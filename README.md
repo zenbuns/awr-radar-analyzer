@@ -23,8 +23,8 @@ A comprehensive tool for analyzing radar point clouds from an AWR1843 mmWave rad
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/radar_point_cloud_analyzer.git
-cd radar_point_cloud_analyzer
+git clone https://github.com/zenbuns/awr-radar-analyzer.git
+cd awr-radar-analyzer
 
 # Install the package and dependencies
 pip install -e .
