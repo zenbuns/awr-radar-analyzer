@@ -1,0 +1,16 @@
+# Core dependencies
+numpy>=1.19.0
+pandas>=1.1.0
+matplotlib>=3.3.0
+scipy>=1.5.0
+
+# GUI dependencies
+PyQt5>=5.15.0
+
+# ROS dependencies (optional - comment out if not using ROS)
+# rclpy>=1.0.0
+# sensor_msgs_py>=0.2.0
+
+# Development dependencies
+pytest>=6.0.0
+pylint>=2.5.0

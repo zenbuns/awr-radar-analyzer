@@ -1,0 +1,60 @@
+# Default parameters for radar point cloud analyzer
+
+# Experiment parameters
+experiment:
+  max_range: 35.0           # Maximum radar detection range in meters
+  circle_interval: 10.0     # Distance interval between range circles in meters
+  collection_duration: 60   # Default duration of data collection in seconds
+  current_config: "default_config"  # Default configuration name
+  target_distance: 5.0      # Default target distance for experiments in meters
+  circle_distance: 5.0      # Default distance to center of sampling circle in meters
+  circle_radius: 0.5        # Default radius of the sampling circle in meters
+  heatmap_resolution: 0.5   # Resolution of the heatmap grid in meters per cell
+  num_trials: 1             # Default number of trials per experiment
+
+# Visualization parameters
+visualization:
+  colormap: "plasma"        # Default colormap for heatmap (plasma has better visibility than viridis)
+  decay_factor: 0.98        # Decay factor for live heatmap
+  mode: "heatmap"           # Default visualization mode (heatmap, contour, combined)
+  noise_floor: 0.05         # Default noise floor threshold
+  smoothing_sigma: 2.0      # Default Gaussian smoothing sigma
+  contour_levels: 6         # Number of contour levels for contour plot
+  
+# ROS parameters
+ros:
+  node_name: "radar_point_cloud_analyzer"
+  pcl_topic: "/ti_mmwave/radar_scan_pcl"
+  track_topic: "/ti_mmwave/radar_track_marker_array"
+  occupancy_topic: "/ti_mmwave/radar_occupancy"
+  qos_profile: 10
+  
+# File paths
+paths:
+  data_dir: "~/radar_experiment_data"
+  heatmap_dir: "~/radar_experiment_data/heatmaps"
+  reports_dir: "~/radar_experiment_data/reports"
+  
+# Circle configuration
+circles:
+  primary:                  # Primary sampling circle
+    enabled: true
+    distance: 5.0
+    radius: 0.5
+    angle: 0.0              # 0 degrees = center
+    color: "lime"
+    label: "Primary"
+  left:                     # Left sampling circle
+    enabled: false
+    distance: 15.0
+    radius: 0.5
+    angle: -60.0            # Negative angle = left side
+    color: "cyan"
+    label: "Left"
+  right:                    # Right sampling circle
+    enabled: false
+    distance: 25.0
+    radius: 0.5
+    angle: 60.0             # Positive angle = right side
+    color: "yellow"
+    label: "Right"
