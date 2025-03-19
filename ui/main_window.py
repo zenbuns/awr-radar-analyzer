@@ -1660,13 +1660,14 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Playback Error", f"Failed to play ROS2 bag: {str(e)}")
     
-    @pyqtSlot(str, list)
-    def record_rosbag(self, save_path, topics):
+    @pyqtSlot(str, list, int)
+    def record_rosbag(self, save_path, topics, duration_minutes=0):
         """Start recording a ROS2 bag file.
         
         Args:
             save_path: Directory to save the bag file.
             topics: List of topics to record.
+            duration_minutes: Duration in minutes to record (0 = unlimited).
         """
         if self.analyzer is None:
             QMessageBox.warning(self, "Not Available", "ROS2 bag recording not available in visualization-only mode.")
@@ -1678,8 +1679,11 @@ class MainWindow(QMainWindow):
             filename = f"radar_recording_{timestamp}"
             full_path = os.path.join(save_path, filename)
             
-            self.analyzer.record_rosbag(full_path, topics)
-            self.status_bar.showMessage(f"Recording ROS2 bag to: {full_path}")
+            # Pass duration to the analyzer's record_rosbag method
+            self.analyzer.record_rosbag(full_path, topics, duration_minutes)
+            
+            duration_text = "" if duration_minutes == 0 else f" for {duration_minutes} minutes"
+            self.status_bar.showMessage(f"Recording ROS2 bag to: {full_path}{duration_text}")
         except Exception as e:
             QMessageBox.critical(self, "Recording Error", f"Failed to start recording: {str(e)}")
     

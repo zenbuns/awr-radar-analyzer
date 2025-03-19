@@ -14,14 +14,18 @@ import subprocess
 import psutil
 from typing import List
 import numpy as np
+from sensor_msgs.msg import PointCloud2
+from visualization_msgs.msg import MarkerArray
+from std_msgs.msg import Bool
 
 
-def play_rosbag(analyzer, bag_path: str) -> None:
+def play_rosbag(analyzer, bag_path: str, loop: bool = True) -> None:
     """Start playback of a ROS2 bag file.
     
     Args:
         analyzer: RadarPointCloudAnalyzer instance.
         bag_path: Path to the bag file to play.
+        loop: Whether to loop the playback or play once.
         
     Raises:
         RuntimeError: If the bag file doesn't exist or can't be played.
@@ -51,7 +55,10 @@ def play_rosbag(analyzer, bag_path: str) -> None:
     if hasattr(analyzer, 'is_recording') and hasattr(analyzer, 'is_playing'):
         if analyzer.is_recording or analyzer.is_playing:
             stop_rosbag(analyzer)
-        
+    
+    # Set visibility to true for data collection purposes
+    analyzer.visible = True
+            
     try:
         # First examine the bag to get the topics it contains and duration
         analyzer.get_logger().info(f"Examining topics in bag: {bag_path}")
@@ -78,10 +85,18 @@ def play_rosbag(analyzer, bag_path: str) -> None:
         # Prepare ros2 bag play command with enhanced options for better compatibility
         cmd = [
             'ros2', 'bag', 'play',
-            '--loop',  # Loop playback for testing
             '--read-ahead-queue-size', '1000',  # Increase buffer size
-            bag_path
         ]
+        
+        # Only add loop option if requested
+        if loop:
+            cmd.append('--loop')  # Loop playback for testing
+            analyzer.get_logger().info("Bag will loop when playback ends")
+        else:
+            analyzer.get_logger().info("Bag will play once and then stop")
+        
+        # Add bag path last
+        cmd.append(bag_path)
         
         analyzer.get_logger().info(f"Starting ROS2 bag playback with command: {' '.join(cmd)}")
         
@@ -97,6 +112,9 @@ def play_rosbag(analyzer, bag_path: str) -> None:
         analyzer.current_bag_path = bag_path
         analyzer.bag_start_time = time.time()
         
+        # Store whether this is a looping playback
+        analyzer.bag_looping = loop
+        
         analyzer.get_logger().info(f"Started playing ROS2 bag: {bag_path}")
     except Exception as e:
         error_msg = f"Failed to play ROS2 bag: {str(e)}"
@@ -104,13 +122,14 @@ def play_rosbag(analyzer, bag_path: str) -> None:
         raise RuntimeError(error_msg)
 
 
-def record_rosbag(analyzer, output_path: str, topics: List[str]) -> None:
+def record_rosbag(analyzer, output_path: str, topics: List[str], duration_minutes: int = 0) -> None:
     """Start recording a ROS2 bag file.
     
     Args:
         analyzer: RadarPointCloudAnalyzer instance.
         output_path: Path where the bag should be saved.
         topics: List of topics to record.
+        duration_minutes: Optional recording duration in minutes (0 = no limit).
         
     Raises:
         RuntimeError: If recording can't be started.
@@ -132,6 +151,12 @@ def record_rosbag(analyzer, output_path: str, topics: List[str]) -> None:
         # Create the ros2 bag record command
         cmd = ['ros2', 'bag', 'record', '-o', output_path] + topics_args
         
+        # If duration is specified, convert to seconds and add to command
+        if duration_minutes > 0:
+            duration_seconds = duration_minutes * 60
+            cmd.extend(['--duration', str(duration_seconds)])
+            analyzer.get_logger().info(f"Setting recording duration to {duration_minutes} minutes ({duration_seconds} seconds)")
+        
         analyzer.get_logger().info(f"Starting ROS2 bag recording with command: {' '.join(cmd)}")
         
         # Start the recording process
@@ -146,6 +171,12 @@ def record_rosbag(analyzer, output_path: str, topics: List[str]) -> None:
         analyzer.is_recording = True
         analyzer.current_bag_path = output_path
         analyzer.bag_start_time = time.time()
+        
+        # Store the expected recording end time if duration is set
+        if duration_minutes > 0:
+            analyzer.recording_end_time = time.time() + (duration_minutes * 60)
+        else:
+            analyzer.recording_end_time = None
         
         analyzer.get_logger().info(f"Started recording ROS2 bag to: {output_path}")
     except Exception as e:
@@ -231,19 +262,19 @@ def stop_rosbag(analyzer) -> None:
         
         # Recreate subscriptions with the same reliable QoS profile
         analyzer.pcl_subscription = analyzer.create_subscription(
-            analyzer.__class__._pcl_msg_type, 
+            PointCloud2, 
             '/ti_mmwave/radar_scan_pcl', 
             analyzer.pcl_callback, 
             analyzer.reliable_qos
         )
         analyzer.track_array_subscription = analyzer.create_subscription(
-            analyzer.__class__._track_array_msg_type, 
+            MarkerArray, 
             '/ti_mmwave/radar_track_marker_array', 
             analyzer.track_array_callback, 
             analyzer.reliable_qos
         )
         analyzer.occupancy_subscription = analyzer.create_subscription(
-            analyzer.__class__._occupancy_msg_type, 
+            Bool, 
             '/ti_mmwave/radar_occupancy', 
             analyzer.occupancy_callback, 
             analyzer.reliable_qos
@@ -410,14 +441,22 @@ def seek_rosbag(analyzer, position: float) -> None:
                 except Exception as e:
                     analyzer.get_logger().warn(f"Error stopping previous playback: {str(e)}")
             
+            # Check whether to loop the playback
+            loop = getattr(analyzer, 'bag_looping', True)  # Default to True for backward compatibility
+            
             # Start new playback with the offset
             cmd = [
                 'ros2', 'bag', 'play',
-                '--loop',
                 '--read-ahead-queue-size', '1000',
                 '--start-offset', f"{offset:.2f}",
-                analyzer.current_bag_path
             ]
+            
+            # Add loop option if needed
+            if loop:
+                cmd.append('--loop')
+                
+            # Add bag path last
+            cmd.append(analyzer.current_bag_path)
             
             analyzer.get_logger().info(f"Starting ROS2 bag playback with seek: {' '.join(cmd)}")
             
@@ -443,7 +482,8 @@ def seek_rosbag(analyzer, position: float) -> None:
         
         # Fallback: Just restart from beginning
         analyzer.get_logger().info(f"Restarting bag from beginning: {analyzer.current_bag_path}")
-        play_rosbag(analyzer, analyzer.current_bag_path)
+        loop = getattr(analyzer, 'bag_looping', True)  # Default to True for backward compatibility
+        play_rosbag(analyzer, analyzer.current_bag_path, loop)
         
     except Exception as e:
         analyzer.get_logger().error(f"Error seeking in ROS2 bag: {str(e)}")

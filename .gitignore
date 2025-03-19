@@ -62,3 +62,11 @@ venv.bak/
 *.csv
 *.dat
 */radar_experiment_data/* 
+# Cursor rules
+.cursor/rules/
+
+# Cursor rules
+.cursor/rules/
+
+# Cursor rules
+.cursor/rules/

@@ -74,6 +74,7 @@ class RadarAnalyzerSignals(QObject):
     # Define PyQt signals for UI updates
     update_playback_position_signal = pyqtSignal(float)  # Normalized position (0.0-1.0)
     data_reset_signal = pyqtSignal()  # Signal to indicate data has been reset
+    bag_playback_ended = pyqtSignal()  # Signal to indicate bag playback has ended
 
 
 # Main analyzer class that inherits only from Node
@@ -429,6 +430,7 @@ class RadarPointCloudAnalyzer(Node):
                         self.hard_reset_pcl()
                         # Stop data collection if it was active
                         if self.collecting_data:
+                            self.get_logger().info("Automatically stopping data collection as bag playback ended")
                             self.stop_data_collection()
                         # Reset visibility flag to stop processing
                         self.visible = False
@@ -441,43 +443,73 @@ class RadarPointCloudAnalyzer(Node):
                         self.is_recording = False
                         self.current_bag_path = None
                         self.bag_start_time = None
+                        
+                        # Emit signal to notify UI that bag playback has ended
+                        try:
+                            self.signals.bag_playback_ended.emit()
+                            self.get_logger().info("Emitted bag_playback_ended signal to UI")
+                        except Exception as e:
+                            self.get_logger().error(f"Failed to emit bag_playback_ended signal: {str(e)}")
+                            
                         self.get_logger().info("Analyzer stopped and reset after bag playback ended")
                 
-                # Monitor point cloud reception during playback
-                elif self.is_playing and hasattr(self, 'last_pcl_msg_time') and self.last_pcl_msg_time is not None:
-                    time_since_last_msg = (self.get_clock().now() - self.last_pcl_msg_time).nanoseconds / 1e9
-                    if time_since_last_msg > 2.0:  # No messages for 2 seconds
-                        self.get_logger().warn(
-                            f"No point cloud messages received for {time_since_last_msg:.1f}s during bag playback"
-                        )
-                        # Try to read bag contents for diagnostics
-                        if self.current_bag_path and os.path.exists(self.current_bag_path):
-                            try:
-                                import subprocess
-                                self.get_logger().info(f"Checking topics in bag: {self.current_bag_path}")
-                                info_cmd = subprocess.run(
-                                    ['ros2', 'bag', 'info', self.current_bag_path], 
-                                    capture_output=True, text=True
-                                )
-                                self.get_logger().info(f"Bag info: {info_cmd.stdout}")
-                                
-                                # Print ROS topic list to see what's available
-                                self.get_logger().info("Checking active ROS topics:")
-                                topics_cmd = subprocess.run(
-                                    ['ros2', 'topic', 'list'], 
-                                    capture_output=True, text=True
-                                )
-                                self.get_logger().info(f"Active topics:\n{topics_cmd.stdout}")
-                                
-                                # Restart playback if needed
-                                if self.pcl_msg_count == 0 and self.is_playing:
-                                    self.get_logger().warn("No point cloud messages received, restarting bag playback")
-                                    self.stop_rosbag()
-                                    # Wait a moment before restarting
-                                    time.sleep(1.0)
-                                    self.play_rosbag(self.current_bag_path)
-                            except Exception as e:
-                                self.get_logger().error(f"Error during bag diagnostics: {str(e)}")
+                # If bag is playing and not looping, check if it's nearing the end
+                elif self.is_playing and hasattr(self, 'bag_looping') and not self.bag_looping:
+                    if hasattr(self, 'bag_start_time') and hasattr(self, 'bag_duration') and self.bag_start_time is not None and self.bag_duration > 0:
+                        current_time = time.time()
+                        elapsed_playback = current_time - self.bag_start_time
+                        
+                        # If we're within 1 second of the end of the bag, prepare to finish up
+                        if elapsed_playback >= (self.bag_duration - 1.0):
+                            self.get_logger().info(f"Bag nearing end: {elapsed_playback:.1f}s of {self.bag_duration:.1f}s")
+                            
+                            # If we're past the end and still playing, force stop
+                            if elapsed_playback > self.bag_duration + 2.0:
+                                self.get_logger().info("Bag should have ended by now, forcing stop")
+                                # Emit signal before stopping to ensure UI is notified
+                                try:
+                                    self.signals.bag_playback_ended.emit()
+                                    self.get_logger().info("Emitted bag_playback_ended signal to UI (timeout)")
+                                except Exception as e:
+                                    self.get_logger().error(f"Failed to emit bag_playback_ended signal: {str(e)}")
+                                    
+                                stop_rosbag(self)
+                
+                    # Monitor point cloud reception during playback
+                    elif hasattr(self, 'last_pcl_msg_time') and self.last_pcl_msg_time is not None:
+                        time_since_last_msg = (self.get_clock().now() - self.last_pcl_msg_time).nanoseconds / 1e9
+                        if time_since_last_msg > 2.0:  # No messages for 2 seconds
+                            self.get_logger().warn(
+                                f"No point cloud messages received for {time_since_last_msg:.1f}s during bag playback"
+                            )
+                            # Try to read bag contents for diagnostics
+                            if self.current_bag_path and os.path.exists(self.current_bag_path):
+                                try:
+                                    import subprocess
+                                    self.get_logger().info(f"Checking topics in bag: {self.current_bag_path}")
+                                    info_cmd = subprocess.run(
+                                        ['ros2', 'bag', 'info', self.current_bag_path], 
+                                        capture_output=True, text=True
+                                    )
+                                    self.get_logger().info(f"Bag info: {info_cmd.stdout}")
+                                    
+                                    # Print ROS topic list to see what's available
+                                    self.get_logger().info("Checking active ROS topics:")
+                                    topics_cmd = subprocess.run(
+                                        ['ros2', 'topic', 'list'], 
+                                        capture_output=True, text=True
+                                    )
+                                    self.get_logger().info(f"Active topics:\n{topics_cmd.stdout}")
+                                    
+                                    # Restart playback if needed
+                                    if self.pcl_msg_count == 0 and self.is_playing:
+                                        self.get_logger().warn("No point cloud messages received, restarting bag playback")
+                                        self.stop_rosbag()
+                                        # Wait a moment before restarting
+                                        time.sleep(1.0)
+                                        self.play_rosbag(self.current_bag_path)
+                                except Exception as e:
+                                    self.get_logger().error(f"Error during bag diagnostics: {str(e)}")
 
     def start_data_collection(self, config_name: str, target_distance: str, duration: int = 60) -> bool:
         """
@@ -862,6 +894,11 @@ class RadarPointCloudAnalyzer(Node):
                 if self.viz_components['circle_scatter'] is not None:
                     self.viz_components['circle_scatter'].set_offsets(np.empty((0, 2)))
                 
+                # IMPORTANT: Also clear experiment_data to avoid keeping stale data
+                if hasattr(self, 'experiment_data'):
+                    self.get_logger().info("Clearing experiment_data during hard reset")
+                    self.experiment_data.clear()
+                
                 # Emit signal to notify UI that data has been reset
                 try:
                     self.signals.data_reset_signal.emit()
@@ -874,7 +911,7 @@ class RadarPointCloudAnalyzer(Node):
         except Exception as e:
             self.get_logger().error(f"Error during PCL hard reset: {str(e)}")
             
-    def play_rosbag(self, bag_path: str) -> bool:
+    def play_rosbag(self, bag_path: str, loop: bool = True) -> bool:
         """
         Play a ROS2 bag file.
         
@@ -883,19 +920,26 @@ class RadarPointCloudAnalyzer(Node):
         
         Args:
             bag_path: Path to the ROS2 bag file to play
+            loop: Whether to loop the playback when it ends
             
         Returns:
             Success status of the playback operation
         """
         from radar_analyzer.utils.ros_bag_handler import play_rosbag as play_rosbag_func
         try:
-            play_rosbag_func(self, bag_path)
+            # Clear experiment data when starting a new bag playback
+            if hasattr(self, 'experiment_data') and not self.collecting_data:
+                self.get_logger().info("Clearing experiment data before starting bag playback")
+                with self.data_lock:
+                    self.experiment_data.clear()
+            
+            play_rosbag_func(self, bag_path, loop)
             return True
         except Exception as e:
             self.get_logger().error(f"Error in play_rosbag: {str(e)}")
             return False
 
-    def record_rosbag(self, output_path: str, topics: List[str] = None) -> bool:
+    def record_rosbag(self, output_path: str, topics: List[str] = None, duration_minutes: int = 0) -> bool:
         """
         Record a ROS2 bag file.
         
@@ -905,13 +949,14 @@ class RadarPointCloudAnalyzer(Node):
         Args:
             output_path: Path to save the ROS2 bag file
             topics: List of topics to record, if None, all topics are recorded
+            duration_minutes: Duration in minutes to record (0 = unlimited)
             
         Returns:
             Success status of the recording operation
         """
         from radar_analyzer.utils.ros_bag_handler import record_rosbag as record_rosbag_func
         try:
-            record_rosbag_func(self, output_path, topics if topics else [])
+            record_rosbag_func(self, output_path, topics if topics else [], duration_minutes)
             return True
         except Exception as e:
             self.get_logger().error(f"Error in record_rosbag: {str(e)}")
@@ -922,14 +967,27 @@ class RadarPointCloudAnalyzer(Node):
         Stop an active ROS2 bag playback or recording.
         
         Wrapper around the stop_rosbag function that maintains
-        class state for bag operations.
+        class state for bag operations. Ensures all data is properly
+        reset when stopping.
         
         Returns:
             Success status of the stop operation
         """
         from radar_analyzer.utils.ros_bag_handler import stop_rosbag as stop_rosbag_func
         try:
+            was_playing = self.is_playing
             stop_rosbag_func(self)
+            
+            # If we were playing (not just recording), perform hard reset
+            if was_playing:
+                self.get_logger().info("Performing hard reset after stopping bag playback")
+                self.hard_reset_pcl()
+                
+                # If data collection was active, stop it
+                if self.collecting_data:
+                    self.get_logger().info("Stopping data collection after bag playback ended")
+                    self.stop_data_collection()
+            
             return True
         except Exception as e:
             self.get_logger().error(f"Error in stop_rosbag: {str(e)}")

@@ -282,3 +282,100 @@ def compute_heatmap_metrics(analyzer) -> Dict[str, float]:
             'total_cells': 1.0,
             'coverage_percentage': 0.0
         }
+
+def update_progress(self):
+    analyzer = self.main_window.analyzer
+    if not analyzer or not hasattr(analyzer, 'experiment_data'):
+        return
+        
+    # Use thread-safe access with data_lock
+    if hasattr(analyzer, 'data_lock'):
+        with analyzer.data_lock:
+            if hasattr(analyzer, 'experiment_data') and hasattr(analyzer.experiment_data, 'x_points'):
+                points = len(analyzer.experiment_data.x_points)
+                self.points_collected_label.setText(f"Points: {points}")
+    else:  # Properly indent this else clause
+        # Fallback if no data_lock available
+        points = len(analyzer.experiment_data.x_points) if hasattr(analyzer.experiment_data, 'x_points') else 0
+        self.points_collected_label.setText(f"Points: {points}")
+
+def play_rosbag(self, bag_path: str, loop: bool = True) -> bool:
+    try:
+        # Clear experiment data when starting a new bag playback
+        if hasattr(self, 'experiment_data') and not self.collecting_data:
+            self.get_logger().info("Clearing experiment data before starting bag playback")
+            with self.data_lock:
+                self.experiment_data.clear()
+        
+        # Rest of existing implementation
+        play_rosbag_func(self, bag_path, loop)
+        return True
+    except Exception as e:
+        self.get_logger().error(f"Error in play_rosbag: {str(e)}")
+        return False
+
+def _start_collection_from_bag(self):
+    """Start data collection from a ROS2 bag."""
+    analyzer = self.main_window.analyzer
+    if not analyzer:
+        return
+        
+    # Ensure data is cleared before starting new collection
+    if hasattr(analyzer, 'experiment_data') and hasattr(analyzer.experiment_data, 'clear'):
+        print("Explicitly clearing experiment data before starting collection")
+        with analyzer.data_lock:
+            analyzer.experiment_data.clear()
+            
+    # Rest of existing implementation
+
+def on_generate_from_bag_changed(self, state):
+    is_checked = state == Qt.Checked
+    
+    # Immediate UI feedback
+    self.generate_from_bag_check.setEnabled(False)
+    self.set_status(f"{'Enabling' if is_checked else 'Disabling'} data generation from bag...")
+    QApplication.processEvents()
+    
+    # Track state changes explicitly
+    if is_checked:
+        # Stop any previous data collection if it was active
+        if hasattr(self.main_window.analyzer, 'collecting_data') and self.main_window.analyzer.collecting_data:
+            print("Stopping previous data collection before starting new one")
+            self.stop_collection.emit()
+            # Wait a moment for collection to stop
+            QTimer.singleShot(300, lambda: self._enable_generate_from_bag(is_checked))
+        else:
+            self._enable_generate_from_bag(is_checked)
+    else:
+        # When disabling, make sure we stop data collection and reset flag
+        self.bag_started_for_generation = False
+        if hasattr(self.main_window.analyzer, 'collecting_data') and self.main_window.analyzer.collecting_data:
+            self.stop_collection.emit()
+        # Re-enable immediately
+        self.generate_from_bag_check.setEnabled(True)
+
+def _enable_generate_from_bag(self, enable):
+    """Helper method to enable Generate from Bag with proper timing."""
+    # Clear data before starting
+    if enable and self.main_window and self.main_window.analyzer:
+        with self.main_window.analyzer.data_lock:
+            if hasattr(self.main_window.analyzer, 'experiment_data'):
+                self.main_window.analyzer.experiment_data.clear()
+    
+    # Set flag and restart bag if already playing
+    if enable:
+        self.bag_started_for_generation = True
+        # If bag is already playing, restart it to start collection
+        if hasattr(self.main_window.analyzer, 'is_playing') and self.main_window.analyzer.is_playing:
+            self._restart_bag_and_collection()
+        # Otherwise, if a bag path is selected, play it
+        elif self.bag_path_edit.text():
+            self.play_rosbag.emit(self.bag_path_edit.text(), False)  # Don't loop for data generation
+            QTimer.singleShot(500, self._start_collection_from_bag)
+        else:
+            self.set_status("No bag file selected. Please select a bag file first.")
+            self.generate_from_bag_check.setChecked(False)
+            self.bag_started_for_generation = False
+    
+    # Re-enable the checkbox
+    self.generate_from_bag_check.setEnabled(True)

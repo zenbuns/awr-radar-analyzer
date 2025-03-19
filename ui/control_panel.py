@@ -12,15 +12,18 @@ from PyQt5.QtWidgets import (
     QSlider, QComboBox, QLineEdit, QSpinBox, QCheckBox,
     QPushButton, QProgressBar, QFormLayout, QButtonGroup,
     QRadioButton, QFileDialog, QDoubleSpinBox, QTabWidget,
-    QGridLayout, QFrame
+    QGridLayout, QFrame, QDialog, QListWidget, QListWidgetItem
 )
 from PyQt5.QtGui import QPixmap, QColor, QPainter, QIcon
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QSize
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QSize, QDateTime, QThread
 import os
 import json
 from radar_analyzer.processing.data_processor import filter_points_in_circle, calculate_heatmap_size
 from radar_analyzer.visualization.visualizer import update_plot, update_heatmap_display
 from radar_analyzer.utils.ros_bag_handler import play_rosbag, record_rosbag, stop_rosbag
+import time
+import glob
+from PyQt5.QtWidgets import QApplication
 
 
 class ControlPanel(QWidget):
@@ -75,7 +78,7 @@ class ControlPanel(QWidget):
     
     # ROS2 Bag and Point Cloud signals
     play_rosbag = pyqtSignal(str)  # Path to bag file
-    record_rosbag = pyqtSignal(str, list)  # Path and topics to record
+    record_rosbag = pyqtSignal(str, list, int)  # Path, topics, and duration in minutes to record
     stop_rosbag = pyqtSignal()  # Stop recording or playback
     timeline_position_changed = pyqtSignal(float)  # Bag playback position (0.0-1.0)
     visualize_pointcloud = pyqtSignal(str)  # Point cloud topic
@@ -100,6 +103,13 @@ class ControlPanel(QWidget):
         self.status_timer = QTimer()
         self.status_timer.setSingleShot(True)
         self.status_timer.timeout.connect(self.clear_status)
+        
+        # Track if bag playback was started for data generation
+        self.bag_started_for_generation = False
+        
+        # Point counter tracking for throttling
+        self.last_point_count = 0
+        self.point_update_counter = 0
         
         # Create UI components
         self.setup_ui()
@@ -867,14 +877,24 @@ class ControlPanel(QWidget):
         self.bag_path_edit.setToolTip("Path to ROS2 bag file for playback")
         self.bag_path_edit.setMinimumHeight(28)  # Slightly taller for better touch targets
         
+        # Discover button to find available ROS2 bags
+        refresh_button = QPushButton()
+        refresh_button.setIcon(QIcon.fromTheme("view-refresh"))
+        refresh_button.setToolTip("Discover ROS2 bags in common directories")
+        refresh_button.setMinimumHeight(28)
+        refresh_button.setMaximumWidth(32)
+        refresh_button.setCursor(Qt.PointingHandCursor)
+        refresh_button.clicked.connect(self.discover_rosbags)
+        
         bag_select_button = QPushButton("Browse")
         bag_select_button.setMinimumHeight(28)
         bag_select_button.setCursor(Qt.PointingHandCursor)  # Change cursor on hover
         bag_select_button.setIcon(QIcon.fromTheme("folder-open"))
         bag_select_button.clicked.connect(self.on_select_bagfile)
         
-        bag_select_layout.addWidget(self.bag_path_edit, 3)  # Proportional sizing
-        bag_select_layout.addWidget(bag_select_button, 1)
+        bag_select_layout.addWidget(self.bag_path_edit, 5)  # Proportional sizing
+        bag_select_layout.addWidget(refresh_button, 1)      # Refresh button
+        bag_select_layout.addWidget(bag_select_button, 2)   # Browse button
         
         playback_layout.addLayout(bag_select_layout)
         playback_layout.addSpacing(8)  # Add spacing between sections
@@ -942,6 +962,33 @@ class ControlPanel(QWidget):
         """)
         self.timeline_slider.valueChanged.connect(self.on_timeline_changed)
         timeline_layout.addWidget(self.timeline_slider)
+        
+        # Add "Generate from Bag" checkbox for data collection during playback
+        self.generate_from_bag_check = QCheckBox("Generate from bag")
+        self.generate_from_bag_check.setEnabled(False)  # Initially disabled until bag is loaded
+        self.generate_from_bag_check.setStyleSheet("""
+            QCheckBox {
+                color: #4CAF50;
+                font-weight: bold;
+                margin-top: 5px;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #4CAF50;
+                border: 2px solid #4CAF50;
+                border-radius: 3px;
+            }
+            QCheckBox::indicator:unchecked {
+                border: 2px solid #BDBDBD;
+                border-radius: 3px;
+            }
+        """)
+        self.generate_from_bag_check.setToolTip("Enable to collect data from bag playback")
+        self.generate_from_bag_check.stateChanged.connect(self.on_generate_from_bag_changed)
+        playback_layout.addWidget(self.generate_from_bag_check)
         
         playback_layout.addLayout(timeline_layout)
         
@@ -1042,8 +1089,51 @@ class ControlPanel(QWidget):
         record_path_layout.addWidget(self.record_path_edit, 3)  # Proportional sizing
         record_path_layout.addWidget(record_path_button, 1)
         
-        recording_layout.addLayout(record_path_layout)
-        recording_layout.addSpacing(8)  # Add spacing between sections
+        # Recording duration controls
+        duration_layout = QHBoxLayout()
+        duration_layout.setSpacing(8)
+        
+        duration_label = QLabel("Duration:")
+        duration_label.setStyleSheet("font-weight: bold;")
+        duration_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        duration_label.setMinimumWidth(50)
+        
+        self.record_duration_spin = QSpinBox()
+        self.record_duration_spin.setRange(0, 60)  # 0 means no time limit
+        self.record_duration_spin.setValue(0)
+        self.record_duration_spin.setSuffix(" min")
+        self.record_duration_spin.setSpecialValueText("No limit")  # Show "No limit" when value is 0
+        self.record_duration_spin.setToolTip("Recording duration (0 = no time limit)")
+        self.record_duration_spin.setMinimumHeight(28)
+        self.record_duration_spin.setStyleSheet("""
+            QSpinBox {
+                border: 1px solid #BDBDBD;
+                border-radius: 4px;
+                padding: 4px 8px;
+                background-color: #FFFFFF;
+                color: #212121;
+            }
+            QSpinBox::up-button, QSpinBox::down-button {
+                border-radius: 2px;
+                background-color: #E0E0E0;
+                width: 16px;
+            }
+            QSpinBox::up-button:hover, QSpinBox::down-button:hover {
+                background-color: #BDBDBD;
+            }
+        """)
+        self.record_duration_spin.valueChanged.connect(self.on_record_duration_changed)
+        
+        duration_layout.addWidget(duration_label, 1)
+        duration_layout.addWidget(self.record_duration_spin, 3)
+        recording_layout.addLayout(duration_layout)
+        
+        # Add estimated bag size label
+        self.bag_size_label = QLabel("Est. size: Unknown (unlimited duration)")
+        self.bag_size_label.setStyleSheet("color: #777777; font-style: italic;")
+        self.bag_size_label.setAlignment(Qt.AlignRight)
+        recording_layout.addWidget(self.bag_size_label)
+        recording_layout.addSpacing(8)
         
         # Topics selection - improved with clearer labeling
         topics_layout = QHBoxLayout()
@@ -1200,96 +1290,307 @@ class ControlPanel(QWidget):
                 return True
         return False
     
-    def on_play_rosbag(self):
-        """Handle play bag button."""
+    def on_generate_from_bag_changed(self, state):
+        """Handle changes to the 'Generate from Bag' checkbox."""
+        is_checked = state == Qt.Checked
+        
+        # Prevent rapid toggling of the checkbox
+        self.generate_from_bag_check.setEnabled(False)
+        
+        # Immediate UI feedback
+        QApplication.processEvents()  # Force UI update
+        self.set_status(f"{'Enabling' if is_checked else 'Disabling'} data generation from bag...")
+        
+        # Re-enable after a short delay to prevent accidental clicks
+        QTimer.singleShot(500, lambda: self.generate_from_bag_check.setEnabled(True))
+        
+        # Update the UI to show the checkbox state
+        if is_checked:
+            print("Generate from bag enabled, preparing to start playback...")
+            
+            # First, make sure any previous data collection is stopped
+            if self.main_window and self.main_window.analyzer and hasattr(self.main_window.analyzer, 'collecting_data'):
+                if self.main_window.analyzer.collecting_data:
+                    print("Stopping previous data collection before starting new one")
+                    # Use try/except in case the signal emission fails
+                    try:
+                        self.stop_collection.emit()
+                        # Wait to ensure collection stops before proceeding
+                        print("Waiting for previous collection to stop...")
+                        QApplication.processEvents()
+                        QTimer.singleShot(500, lambda: self._enable_generate_from_bag())
+                        return
+                    except Exception as e:
+                        print(f"Error stopping previous collection: {e}")
+            
+            # Acquire bag file path
+            bag_path = self.bag_path_edit.text().strip()
+            if not bag_path:
+                self.set_status("Please select a bag file first")
+                self.generate_from_bag_check.setChecked(False)
+                return
+            
+            # Start playing the bag automatically if not already playing
+            if self.main_window and self.main_window.analyzer:
+                if hasattr(self.main_window.analyzer, 'is_playing'):
+                    if not self.main_window.analyzer.is_playing:
+                        # Set flag to track that bag was started for generation
+                        self.bag_started_for_generation = True
+                        
+                        # Play bag once (no loop) for data generation
+                        print(f"Starting bag playback without looping: {bag_path}")
+                        # First, stop any existing playback to ensure clean state
+                        try:
+                            self.stop_rosbag.emit()
+                            # Small wait to ensure playback is stopped
+                            QApplication.processEvents()
+                            time.sleep(0.2)
+                        except Exception as e:
+                            print(f"Error stopping existing playback: {e}")
+                        
+                        # Now start the new playback
+                        success = self.play_bag_with_options(bag_path, loop=False)
+                        
+                        if success:
+                            # Small delay to ensure playback starts before collection
+                            print("Scheduling data collection to start in 1 second...")
+                            QTimer.singleShot(1000, self._start_collection_from_bag)
+                        else:
+                            self.set_status("Failed to start bag playback")
+                            self.generate_from_bag_check.setChecked(False)
+                    else:  # Bag is already playing
+                        # Set flag that bag is being used for generation
+                        print("Bag is already playing, reusing for data generation")
+                        self.bag_started_for_generation = True
+                        
+                        # If bag is already playing, restart it without looping
+                        if self.bag_path_edit.text().strip():
+                            # Stop current playback
+                            try:
+                                self.stop_rosbag.emit()
+                                # Wait for playback to stop completely before restarting
+                                print("Stopping current playback to restart without looping...")
+                                QApplication.processEvents()
+                                QTimer.singleShot(500, lambda: self._restart_bag_and_collection())
+                            except Exception as e:
+                                print(f"Error stopping playback: {e}")
+                        else:
+                            # If bag is already playing but we don't have a path, start collection immediately
+                            print("Starting collection from currently playing bag...")
+                            self._start_collection_from_bag()
+                else:
+                    self.set_status("Analyzer doesn't support playback")
+                    self.generate_from_bag_check.setChecked(False)
+            else:
+                self.set_status("Analyzer not available")
+                self.generate_from_bag_check.setChecked(False)
+        else:  # Checkbox unchecked - disable data generation
+            self.bag_started_for_generation = False
+            self.set_status("Data generation from bag disabled", timeout=3000)
+            
+            # If data collection is active, stop it
+            if self.main_window and self.main_window.analyzer and hasattr(self.main_window.analyzer, 'collecting_data'):
+                if self.main_window.analyzer.collecting_data:
+                    try:
+                        print("Stopping data collection due to generate_from_bag being disabled")
+                        self.stop_collection.emit()
+                        # Update UI elements related to data collection
+                        self.start_button.setEnabled(True)
+                        self.stop_button.setEnabled(False)
+                    except Exception as e:
+                        print(f"Error stopping collection: {e}")
+                
+        print(f"Generate from bag state changed to: {is_checked}")
+    
+    def _enable_generate_from_bag(self):
+        """Helper method to retry enabling Generate from Bag after stopping collection."""
+        self.generate_from_bag_check.setChecked(True)
+        self.on_generate_from_bag_changed(Qt.Checked)
+    
+    def _restart_bag_and_collection(self):
+        """Helper method to restart bag playback and start collection."""
         bag_path = self.bag_path_edit.text().strip()
-        if not bag_path:
-            self.set_status("Please select a bag file first")
-            return
-        
-        # Reset timeline UI
-        self.timeline_slider.setValue(0)
-        self.timeline_slider.setEnabled(True)  # Enable timeline slider
-        
-        # Start playback
-        self.play_rosbag.emit(bag_path)
+        if bag_path:
+            self.play_bag_with_options(bag_path, loop=False)
+            QTimer.singleShot(500, self._start_collection_from_bag)
+    
+    def play_bag_with_options(self, bag_path, loop=True):
+        """Helper method to play a bag with specific options."""
+        # Update UI
+        self.set_status(f"Playing bag: {bag_path}")
         self.play_button.setEnabled(False)
         self.stop_playback_button.setEnabled(True)
-        self.set_status(f"Playing bag: {bag_path}")
+        
+        # Use custom signal to pass the loop parameter
+        if hasattr(self, 'main_window') and hasattr(self.main_window, 'analyzer'):
+            analyzer = self.main_window.analyzer
+            if analyzer:
+                try:
+                    # Call play_rosbag directly on the analyzer with the loop parameter
+                    from radar_analyzer.utils.ros_bag_handler import play_rosbag
+                    play_rosbag(analyzer, bag_path, loop)
+                except Exception as e:
+                    self.set_status(f"Error playing bag: {str(e)}")
+                    return False
+                return True
+        
+        # Fall back to the standard signal if direct call fails
+        self.play_rosbag.emit(bag_path)
+        return True
     
-    def on_record_rosbag(self):
-        """Handle record bag button."""
-        record_path = self.record_path_edit.text().strip()
-        if not record_path:
-            self.set_status("Please select a directory to save the bag")
-            return
+    def _start_collection_from_bag(self):
+        """Helper method to start data collection from bag."""
+        # Get configuration from the data collection panel
+        config_name = self.config_entry.text().strip() or "bag_playback"
+        target_distance = self.target_combo.currentText()
         
-        topics = [t.strip() for t in self.topics_edit.text().split(',') if t.strip()]
-        if not topics:
-            self.set_status("Please specify at least one topic to record")
-            return
+        # Determine duration based on bag file length
+        analyzer = None
+        if self.main_window and hasattr(self.main_window, 'analyzer'):
+            analyzer = self.main_window.analyzer
+            
+            # Important: Make sure experiment_data is cleared before starting collection
+            if hasattr(analyzer, 'experiment_data') and hasattr(analyzer.experiment_data, 'clear'):
+                print("Explicitly clearing experiment data before starting collection")
+                try:
+                    # Ensure we have a data_lock to prevent race conditions
+                    if hasattr(analyzer, 'data_lock'):
+                        with analyzer.data_lock:
+                            analyzer.experiment_data.clear()
+                            print("Experiment data cleared successfully with lock")
+                    else:
+                        analyzer.experiment_data.clear()
+                        print("Warning: Experiment data cleared without lock")
+                except Exception as e:
+                    print(f"Error clearing experiment data: {e}")
         
-        self.record_rosbag.emit(record_path, topics)
-        self.record_button.setEnabled(False)
-        self.stop_record_button.setEnabled(True)
-        self.set_status(f"Recording to {record_path}: {', '.join(topics)}")
+        # Use bag duration if available, otherwise use default value
+        if analyzer and hasattr(analyzer, 'bag_duration') and analyzer.bag_duration > 0:
+            # Convert bag duration from seconds to collection duration in seconds
+            # Round up to the nearest second to ensure we capture the whole bag
+            duration = int(analyzer.bag_duration + 1)
+            self.set_status(f"Using bag duration: {duration} seconds")
+            print(f"Starting collection with bag duration: {duration} seconds")
+        else:
+            # Fallback to the value in the duration spinner
+            duration = int(self.duration_spin.value())
+            self.set_status(f"Using default duration: {duration} seconds")
+            print(f"Starting collection with default duration: {duration} seconds (bag duration unknown)")
+        
+        # Ensure the duration is reasonable
+        if duration < 5:
+            duration = 5  # Minimum 5 seconds
+            print(f"Adjusted duration to minimum value: {duration} seconds")
+        
+        # Start the data collection
+        try:
+            # Emit a clear signal first if it exists
+            if hasattr(self, 'reset_heatmap'):
+                self.reset_heatmap.emit()
+                print("Emitted reset_heatmap signal to ensure clean state")
+                QApplication.processEvents()  # Process pending events before continuing
+            
+            self.set_status(f"Starting data collection from bag with config: {config_name} for {duration}s")
+            self.start_collection.emit(config_name, target_distance, duration)
+            
+            # Update UI to show collection is in progress
+            self.start_button.setEnabled(False)
+            self.stop_button.setEnabled(True)
+            
+            # Update the progress bar and its maximum value
+            if hasattr(self, 'collection_start_time'):
+                self.collection_start_time = QDateTime.currentDateTime()
+            if hasattr(self, 'collection_duration'):
+                self.collection_duration = duration
+            
+            # Display the collection time in the UI
+            if hasattr(self, 'collection_time_label'):
+                self.collection_time_label.setText(f"Time: 00:00 / {duration//60:02d}:{duration%60:02d}")
+            
+            # Start the timer for progress updates if not already running
+            if hasattr(self, 'progress_timer') and not self.progress_timer.isActive():
+                self.progress_timer.start(100)  # Update every 0.1 seconds
+            
+            print(f"Data collection started: config={config_name}, target={target_distance}, duration={duration}s")
+            
+            # Register for end-of-bag notification to stop collection
+            if analyzer and hasattr(analyzer, 'signals'):
+                try:
+                    # If possible, connect to the bag end signal using our safe helper
+                    if hasattr(analyzer.signals, 'bag_playback_ended'):
+                        self._safely_connect_signal(analyzer.signals.bag_playback_ended, self.on_bag_playback_ended)
+                except Exception as e:
+                    print(f"Error setting up bag end signal: {e}")
+                    
+        except Exception as e:
+            self.set_status(f"Error starting data collection: {e}")
+            print(f"Error starting data collection: {e}")
     
-    def on_stop_rosbag(self):
-        """Handle stop bag button (works for both playback and recording)."""
-        self.stop_rosbag.emit()
+    def on_bag_playback_ended(self):
+        """
+        Handle the end of ROS2 bag playback.
         
-        # Enable/disable appropriate buttons
-        self.play_button.setEnabled(True)
-        self.stop_playback_button.setEnabled(False)
-        self.record_button.setEnabled(True)
-        self.stop_record_button.setEnabled(False)
+        This method is called when the ROS2 bag playback ends.
+        It resets the UI elements related to bag playback and ensures
+        any data generation state is properly cleared.
+        """
+        self.set_status("Bag playback ended")
+        print("Bag playback ended event received")
         
-        # Reset timeline slider
+        # First, update timeline UI
         self.timeline_slider.setValue(0)
         self.timeline_slider.setEnabled(False)
-        self.timeline_dragging = False
-        self.timestamp_label.setText("00:00 / 00:00")
+        self.play_button.setEnabled(True)
+        self.stop_playback_button.setEnabled(False)
         
-        self.set_status("Stopped ROS2 bag playback/recording")
-    
-    def last_used_directory(self):
-        """Get the last used directory for file dialogs.
+        # Process UI updates immediately
+        QApplication.processEvents()
         
-        Returns:
-            str: Path to the last used directory, or empty string if not set.
-        """
-        try:
-            if hasattr(self, 'settings_file') and os.path.exists(self.settings_file):
-                with open(self.settings_file, 'r') as f:
-                    settings = json.load(f)
-                    return settings.get('last_directory', '')
-        except Exception as e:
-            print(f"Error loading last directory: {e}")
-        return ''
-    
-    def save_last_used_directory(self, directory):
-        """Save the last used directory for file dialogs.
-        
-        Args:
-            directory (str): Directory path to save.
-        """
-        try:
-            settings = {}
-            if hasattr(self, 'settings_file'):
-                if os.path.exists(self.settings_file):
-                    try:
-                        with open(self.settings_file, 'r') as f:
-                            settings = json.load(f)
-                    except:
-                        # If file exists but is invalid, start with empty settings
-                        settings = {}
+        # If we were generating data, stop collection and disable checkbox
+        if self.generate_from_bag_check.isChecked():
+            print("Stopping data collection due to bag playback ending")
+            
+            # Disable checkbox first to prevent triggering more events
+            self.generate_from_bag_check.blockSignals(True)
+            self.generate_from_bag_check.setChecked(False)
+            self.generate_from_bag_check.blockSignals(False)
+            
+            # Make sure data collection is stopped
+            if hasattr(self, 'bag_started_for_generation') and self.bag_started_for_generation:
+                print("Stopping collection from bag playback end handler")
+                # Stop collection gracefully
+                try:
+                    self.stop_collection.emit()
+                except Exception as e:
+                    print(f"Error stopping collection: {e}")
                 
-                settings['last_directory'] = directory
+                # Reset the flag
+                self.bag_started_for_generation = False
                 
-                with open(self.settings_file, 'w') as f:
-                    json.dump(settings, f)
-        except Exception as e:
-            print(f"Error saving last directory: {e}")
+                # Update UI elements related to data collection
+                self.start_button.setEnabled(True)
+                self.stop_button.setEnabled(False)
+                
+                if hasattr(self, 'progress_timer') and self.progress_timer.isActive():
+                    self.progress_timer.stop()
+                
+                self.set_status("Data generation stopped as bag playback ended")
+        
+        # Reset the point counter state
+        self.reset_point_counter()
+        
+        if hasattr(self, 'progress_bar'):
+            self.progress_bar.setValue(0)
+            
+        # Final UI update
+        QApplication.processEvents()
+    
+    def reset_point_counter(self):
+        """Reset the point counter display and tracking state."""
+        self.last_point_count = 0
+        self.point_update_counter = 0
+        self.points_collected_label.setText("Points: 0")
+        print("Point counter reset")
     
     def on_timeline_changed(self, value):
         """Handle timeline slider value change.
@@ -1450,7 +1751,7 @@ class ControlPanel(QWidget):
         
         # Create a green status indicator
         status_pixmap = QPixmap(16, 16)
-        status_pixmap.fill(QColor(76, 175, 80))  # Green color
+        status_pixmap.fill(QColor(76, 175, 80))
         status_icon_widgets = self.findChildren(QLabel, "status_icon")
         if status_icon_widgets:
             status_icon_widgets[0].setPixmap(status_pixmap)
@@ -1476,15 +1777,25 @@ class ControlPanel(QWidget):
         
         # Update UI to indicate collection stopped
         self.progress_bar.setValue(0)
+        self.reset_point_counter()
         
         # Create a red status indicator
         status_pixmap = QPixmap(16, 16)
-        status_pixmap.fill(QColor(244, 67, 54))  # Red color
+        status_pixmap.fill(QColor(244, 67, 54))
         status_icon_widgets = self.findChildren(QLabel, "status_icon")
         if status_icon_widgets:
             status_icon_widgets[0].setPixmap(status_pixmap)
         
-        self.set_status("Collection stopped")
+        # If bag playback was started for data generation, stop it too
+        if self.bag_started_for_generation:
+            # Stop the bag playback
+            print("Stopping bag playback that was started for data generation")
+            self.stop_rosbag.emit()
+            self.bag_started_for_generation = False
+            self.generate_from_bag_check.setChecked(False)
+            self.set_status("Collection and bag playback stopped")
+        else:
+            self.set_status("Collection stopped")
     
     def update_progress(self):
         """Update the progress bar during data collection."""
@@ -1508,25 +1819,50 @@ class ControlPanel(QWidget):
         seconds = int(elapsed) % 60
         self.collection_time_label.setText(f"Time: {minutes:02d}:{seconds:02d}")
         
-        # Get the actual points count from the analyzer - ONLY trust actual data
-        points = 0
+        # Get the actual points count from the analyzer - ONLY trust actual data with thread safety
+        display_text = None  # Only set if value changes
+        points = -1  # Invalid value to detect if it was set
+        
         try:
             # Use the direct reference to the main window
             if hasattr(self, 'main_window') and hasattr(self.main_window, 'analyzer') and self.main_window.analyzer:
-                points = len(self.main_window.analyzer.experiment_data.x_points)
-                self.points_collected_label.setText(f"Points: {points}")
-                print(f"Using ACTUAL point count from analyzer: {points}")
+                analyzer = self.main_window.analyzer
+                
+                # Only attempt to access experiment_data with proper data locking
+                if hasattr(analyzer, 'data_lock'):
+                    # Use a separate variable to track if we got points safely
+                    with analyzer.data_lock:
+                        if hasattr(analyzer, 'experiment_data') and hasattr(analyzer.experiment_data, 'x_points'):
+                            points = len(analyzer.experiment_data.x_points)
+                else:
+                    # Log a warning but DON'T try to access experiment_data without a lock
+                    print("WARNING: No data_lock available for thread safety! Cannot reliably read point count.")
             else:
-                # Use placeholder only if we can't get real data
-                self.points_collected_label.setText("Points: --")
                 print("No analyzer available, can't get point count")
         except Exception as e:
-            # Fall back to simple display if there's an error
             print(f"Error getting point count: {e}")
-            self.points_collected_label.setText("Points: --")
         
-        # Print brief debug info
-        print(f"Progress: {progress}%, Time: {minutes:02d}:{seconds:02d}, Actual Points: {points}")
+        # Update point counter with throttling to reduce UI load and race conditions
+        self.point_update_counter += 1
+        
+        # Check if the point count has changed or is -1 (error case)
+        if points != -1:
+            # Every 10th update or when count changes
+            if points != self.last_point_count or self.point_update_counter >= 10:
+                display_text = f"Points: {points}"
+                self.last_point_count = points
+                self.point_update_counter = 0
+                
+                # Only update the UI when needed
+                if display_text:
+                    self.points_collected_label.setText(display_text)
+                    if points > 0 and points % 100 == 0:  # Log periodically for debugging
+                        print(f"Point count update: {points}")
+        else:
+            # Error case - only update occasionally
+            if self.point_update_counter >= 20:
+                self.points_collected_label.setText("Points: --")
+                self.point_update_counter = 0
         
         # Handle completion
         if progress >= 100:
@@ -1540,6 +1876,7 @@ class ControlPanel(QWidget):
     def on_reset_heatmap(self):
         """Handle reset heatmap button click."""
         self.reset_heatmap.emit()
+        self.reset_point_counter()  # Also reset the point counter
         self.set_status("Heatmap reset")
     
     def on_colormap_changed(self, colormap):
@@ -1630,3 +1967,479 @@ class ControlPanel(QWidget):
             text = basic_text
             
         self.metrics_label.setText(text)
+
+    def on_record_duration_changed(self, value):
+        """Handle changes to the recording duration spinner."""
+        # Update the estimated bag size based on the duration
+        self.update_bag_size_estimate()
+
+    def update_bag_size_estimate(self):
+        """Update the estimated bag size label based on the recording duration."""
+        duration_minutes = self.record_duration_spin.value()
+        
+        # If duration is 0 (unlimited), show as "unknown"
+        if duration_minutes == 0:
+            self.bag_size_label.setText("Est. size: Unknown (unlimited duration)")
+            return
+        
+        # Estimate bag size based on common datatypes
+        # Assumptions:
+        # - PointCloud2 messages: ~50KB each, ~10Hz = 500KB/s
+        # - MarkerArray messages: ~5KB each, ~10Hz = 50KB/s
+        # - Other topics: ~100KB/s total
+        # Total: ~650KB/s or ~39MB/min
+        
+        # Count the number of topics
+        topics = [t.strip() for t in self.topics_edit.text().split(',') if t.strip()]
+        topic_count = len(topics)
+        
+        # Base size + per-topic overhead
+        size_per_min = 39 * 1024 * 1024  # 39MB per minute
+        
+        # Adjust for topic count
+        if topic_count > 3:
+            size_per_min = size_per_min * (1 + (topic_count - 3) * 0.2)  # Add 20% per extra topic
+        
+        # Calculate total estimated size
+        total_size_bytes = size_per_min * duration_minutes
+        
+        # Format size for display
+        if total_size_bytes < 1024 * 1024:
+            size_str = f"{total_size_bytes / 1024:.1f} KB"
+        elif total_size_bytes < 1024 * 1024 * 1024:
+            size_str = f"{total_size_bytes / (1024 * 1024):.1f} MB"
+        else:
+            size_str = f"{total_size_bytes / (1024 * 1024 * 1024):.2f} GB"
+        
+        self.bag_size_label.setText(f"Est. size: {size_str}")
+    
+    def discover_rosbags(self):
+        """Find available ROS2 bag files in common directories without freezing the UI."""
+        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QListWidget, QLabel, QPushButton, QHBoxLayout, QProgressBar
+        from PyQt5.QtCore import QThread, pyqtSignal, Qt
+        import os
+        import glob
+        import subprocess
+        import time
+        
+        # Create a worker thread for scanning directories
+        class BagFinderThread(QThread):
+            # Define signals for thread communication
+            found_bag = pyqtSignal(str, str)  # description, path
+            update_status = pyqtSignal(str)   # status message
+            progress_update = pyqtSignal(int, int)  # current, total
+            search_complete = pyqtSignal()
+            
+            def __init__(self, search_paths):
+                super().__init__()
+                self.search_paths = search_paths
+                self.stop_requested = False
+                
+            def run(self):
+                total_paths = len(self.search_paths)
+                for i, path in enumerate(self.search_paths):
+                    if self.stop_requested:
+                        break
+                        
+                    if not os.path.isdir(path):
+                        continue
+                        
+                    self.update_status.emit(f"Searching in {path}...")
+                    self.progress_update.emit(i, total_paths)
+                    
+                    # More efficient approach: first find .db3 files in top directories
+                    top_db3_files = glob.glob(os.path.join(path, "*.db3"))
+                    for db3_file in top_db3_files:
+                        if self.stop_requested:
+                            break
+                        bag_dir = os.path.dirname(db3_file)
+                        self._process_potential_bag(bag_dir)
+                    
+                    # Then check immediate subdirectories (depth=1)
+                    try:
+                        # Use os.listdir which is faster than glob for this purpose
+                        for subdir in os.listdir(path):
+                            if self.stop_requested:
+                                break
+                                
+                            subdir_path = os.path.join(path, subdir)
+                            if not os.path.isdir(subdir_path):
+                                continue
+                                
+                            # Check for typical ROS2 bag directory names
+                            if "bag" in subdir.lower() or "ros" in subdir.lower() or "data" in subdir.lower():
+                                self.update_status.emit(f"Checking {subdir_path}...")
+                                
+                                # First check if this directory itself is a bag
+                                if os.path.exists(os.path.join(subdir_path, "metadata.yaml")):
+                                    self._process_potential_bag(subdir_path)
+                                    continue
+                                    
+                                # Look for db3 files in this likely directory
+                                try:
+                                    for item in os.listdir(subdir_path):
+                                        if item.endswith(".db3"):
+                                            nested_dir = os.path.join(subdir_path, os.path.dirname(item))
+                                            self._process_potential_bag(nested_dir)
+                                            # Only process a few per directory to avoid hanging
+                                            break
+                                except (PermissionError, OSError):
+                                    continue
+                    except (PermissionError, OSError):
+                        continue
+                        
+                    self.search_complete.emit()
+                
+                self.update_status.emit("Search complete")
+                
+            def _process_potential_bag(self, bag_dir):
+                # Check if this is a valid ROS2 bag (has metadata.yaml)
+                if os.path.exists(os.path.join(bag_dir, "metadata.yaml")):
+                    # Get basic info without subprocess for speed
+                    bag_name = os.path.basename(bag_dir)
+                    
+                    try:
+                        # Fast metadata check without full subprocess call
+                        metadata_size = os.path.getsize(os.path.join(bag_dir, "metadata.yaml"))
+                        if metadata_size > 0:
+                            # Calculate rough size from .db3 files 
+                            total_size = 0
+                            db_files = glob.glob(os.path.join(bag_dir, "*.db3"))
+                            for db_file in db_files:
+                                try:
+                                    total_size += os.path.getsize(db_file)
+                                except (OSError, PermissionError):
+                                    pass
+                                
+                                # Format human-readable size
+                                if total_size < 1024 * 1024:
+                                    size_str = f"{total_size / 1024:.1f} KB"
+                                elif total_size < 1024 * 1024 * 1024:
+                                    size_str = f"{total_size / (1024 * 1024):.1f} MB"
+                                else:
+                                    size_str = f"{total_size / (1024 * 1024 * 1024):.2f} GB"
+                                    
+                                description = f"{bag_name} (Size: {size_str})"
+                                self.found_bag.emit(description, bag_dir)
+                    except Exception:
+                        # Fallback to basic info
+                        description = f"{bag_name}"
+                        self.found_bag.emit(description, bag_dir)
+                
+                self.update_status.emit(f"Checked {bag_dir}")
+            
+            def stop(self):
+                self.stop_requested = True
+        
+        # Search paths for ROS2 bags - prioritize likely locations
+        search_paths = [
+            self.last_used_directory() or os.path.expanduser("~"),  # Last used directory or home
+            os.path.expanduser("~/ros2_bags"),                      # Common ROS2 bag location
+            os.path.expanduser("~/rosbags"),                        # Another common location
+            os.path.expanduser("~/bags"),                           # Another variant
+            os.path.join(os.path.expanduser("~"), "Pictures"),      # Pictures directory
+            os.path.expanduser("~/data"),                           # Data directory
+        ]
+        
+        # Create dialog
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Discover ROS2 Bags")
+        dialog.setMinimumSize(700, 400)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # Status display with progress
+        status_layout = QHBoxLayout()
+        status_label = QLabel("Initializing search...")
+        status_layout.addWidget(status_label, 1)
+        
+        progress_bar = QProgressBar()
+        progress_bar.setRange(0, 100)
+        progress_bar.setValue(0)
+        progress_bar.setTextVisible(True)
+        progress_bar.setFormat("Searching...")
+        status_layout.addWidget(progress_bar)
+        
+        layout.addLayout(status_layout)
+        
+        # Bag list
+        bag_list = QListWidget()
+        bag_list.setAlternatingRowColors(True)
+        bag_list.setSelectionMode(QListWidget.SingleSelection)
+        layout.addWidget(bag_list)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        select_button = QPushButton("Select")
+        select_button.setDefault(True)
+        select_button.setEnabled(False)  # Disable until bags are found
+        
+        stop_button = QPushButton("Stop Search")
+        cancel_button = QPushButton("Cancel")
+        
+        button_layout.addWidget(stop_button)
+        button_layout.addStretch()
+        button_layout.addWidget(select_button)
+        button_layout.addWidget(cancel_button)
+        layout.addLayout(button_layout)
+        
+        # Create and set up worker thread
+        worker = BagFinderThread(search_paths)
+        
+        # Handle results dynamically
+        bags_found = []
+        
+        def on_found_bag(description, path):
+            bags_found.append((description, path))
+            item = QListWidgetItem(description)
+            item.setData(Qt.UserRole, path)
+            bag_list.addItem(item)
+            select_button.setEnabled(True)
+            
+        def on_status_update(message):
+            status_label.setText(message)
+            
+        def on_progress_update(current, total):
+            if total > 0:
+                progress_bar.setValue(int(100 * current / total))
+            
+        def on_search_complete():
+            status_label.setText(f"Found {len(bags_found)} ROS2 bags")
+            progress_bar.setValue(100)
+            progress_bar.setFormat("Complete")
+            stop_button.setEnabled(False)
+            
+        def on_stop_search():
+            worker.stop()
+            status_label.setText("Search stopped")
+            stop_button.setEnabled(False)
+        
+        # Connect signals
+        worker.found_bag.connect(on_found_bag)
+        worker.update_status.connect(on_status_update)
+        worker.progress_update.connect(on_progress_update)
+        worker.search_complete.connect(on_search_complete)
+        stop_button.clicked.connect(on_stop_search)
+        
+        # Set up dialog buttons
+        select_button.clicked.connect(dialog.accept)
+        cancel_button.clicked.connect(dialog.reject)
+        
+        # Make sure to clean up thread when dialog closes
+        dialog.finished.connect(worker.stop)
+        
+        # Start the worker thread
+        worker.start()
+        
+        # Show dialog
+        if dialog.exec_() == QDialog.Accepted and bag_list.currentItem():
+            # Get selected bag path
+            selected_path = bag_list.currentItem().data(Qt.UserRole)
+            self.bag_path_edit.setText(selected_path)
+            self.save_last_used_directory(os.path.dirname(selected_path))
+            
+            # Enable the Generate from Bag checkbox now that a bag is loaded
+            self.generate_from_bag_check.setEnabled(True)
+            return True
+        
+        return False
+
+    def on_play_rosbag(self):
+        """Handle play bag button."""
+        bag_path = self.bag_path_edit.text().strip()
+        if not bag_path:
+            self.set_status("Please select a bag file first")
+            return
+            
+        # If there's any active data collection, stop it first
+        if self.main_window and self.main_window.analyzer:
+            analyzer = self.main_window.analyzer
+            if hasattr(analyzer, 'collecting_data') and analyzer.collecting_data:
+                try:
+                    print("Stopping current data collection before starting bag playback")
+                    self.stop_collection.emit()
+                    # Allow time for collection to stop
+                    QApplication.processEvents()
+                    time.sleep(0.2)
+                except Exception as e:
+                    print(f"Error stopping data collection: {e}")
+                    
+            # Reset experiment data if it exists
+            if hasattr(analyzer, 'experiment_data') and hasattr(analyzer.experiment_data, 'clear'):
+                try:
+                    # Use thread-safe access to clear the data
+                    if hasattr(analyzer, 'data_lock'):
+                        with analyzer.data_lock:
+                            analyzer.experiment_data.clear()
+                            print("Experiment data cleared before bag playback")
+                    else:
+                        analyzer.experiment_data.clear()
+                        print("Warning: Experiment data cleared without lock")
+                except Exception as e:
+                    print(f"Error clearing experiment data: {e}")
+        
+        # Reset timeline UI
+        self.timeline_slider.setValue(0)
+        self.timeline_slider.setEnabled(True)  # Enable timeline slider
+        
+        # Enable the "Generate from Bag" checkbox now that a bag is loaded
+        self.generate_from_bag_check.setEnabled(True)
+        
+        # Start playback - loop by default for normal playback
+        self.play_bag_with_options(bag_path, loop=True)
+        
+        # Reset point counter display
+        if hasattr(self, 'points_collected_label'):
+            self.points_collected_label.setText("Points: 0")
+        
+        # If "Generate from Bag" is checked, restart with no loop and start data collection
+        if self.generate_from_bag_check.isChecked():
+            self.stop_rosbag.emit()
+            QTimer.singleShot(500, lambda: self.play_bag_with_options(bag_path, loop=False))
+            QTimer.singleShot(1000, self._start_collection_from_bag)
+
+    def on_record_rosbag(self):
+        """Handle record bag button."""
+        record_path = self.record_path_edit.text().strip()
+        if not record_path:
+            self.set_status("Please select a directory to save the bag")
+            return
+        
+        topics = [t.strip() for t in self.topics_edit.text().split(',') if t.strip()]
+        if not topics:
+            self.set_status("Please specify at least one topic to record")
+            return
+        
+        # Get the recording duration
+        duration_minutes = self.record_duration_spin.value()
+        duration_text = "without time limit" if duration_minutes == 0 else f"for {duration_minutes} min"
+        
+        # If we're also collecting data, make sure the experiment data is cleared
+        if self.main_window and self.main_window.analyzer:
+            analyzer = self.main_window.analyzer
+            if hasattr(analyzer, 'collecting_data') and analyzer.collecting_data:
+                # Stop any current collection before starting a new one
+                try:
+                    print("Stopping current data collection before starting bag recording")
+                    self.stop_collection.emit()
+                    # Allow time for the collection to stop
+                    QApplication.processEvents()
+                    time.sleep(0.2)
+                except Exception as e:
+                    print(f"Error stopping data collection: {e}")
+        
+        # Start recording, passing the duration parameter
+        self.record_rosbag.emit(record_path, topics, duration_minutes)
+        self.record_button.setEnabled(False)
+        self.stop_record_button.setEnabled(True)
+        self.set_status(f"Recording to {record_path} {duration_text}: {', '.join(topics)}")
+        
+        # If a duration is set, start a timer to stop recording automatically
+        if duration_minutes > 0:
+            # Convert minutes to milliseconds
+            duration_ms = duration_minutes * 60 * 1000
+            
+            # Create a single-shot timer to stop recording after the specified duration
+            QTimer.singleShot(duration_ms, self.on_recording_timeout)
+            
+            # Store the expected end time for UI updates
+            self.recording_end_time = time.time() + (duration_minutes * 60)
+
+    def on_recording_timeout(self):
+        """Called when the recording timer expires."""
+        # Only stop if recording is still active
+        if self.main_window and self.main_window.analyzer and hasattr(self.main_window.analyzer, 'is_recording'):
+            if self.main_window.analyzer.is_recording:
+                self.set_status("Recording time limit reached, stopping...")
+                self.stop_rosbag.emit()
+
+    def on_stop_rosbag(self):
+        """Handle stop bag button."""
+        self.stop_rosbag.emit()
+        self.play_button.setEnabled(True)
+        self.record_button.setEnabled(True)
+        self.stop_playback_button.setEnabled(False)
+        self.stop_record_button.setEnabled(False)
+        self.timeline_slider.setValue(0)
+        self.timeline_slider.setEnabled(False)
+        
+        # Disable the "Generate from Bag" checkbox and uncheck it
+        self.generate_from_bag_check.setEnabled(False)
+        self.generate_from_bag_check.setChecked(False)
+        
+        # If data collection is active, stop it
+        if self.main_window and self.main_window.analyzer and hasattr(self.main_window.analyzer, 'collecting_data'):
+            if self.main_window.analyzer.collecting_data:
+                self.stop_collection.emit()
+        
+        self.set_status("Stopped ROS2 bag operation")
+
+    def last_used_directory(self):
+        """Get the last used directory for file dialogs.
+        
+        Returns:
+            str: Path to the last used directory, or empty string if not set.
+        """
+        try:
+            if hasattr(self, 'settings_file') and os.path.exists(self.settings_file):
+                with open(self.settings_file, 'r') as f:
+                    settings = json.load(f)
+                    return settings.get('last_directory', '')
+        except Exception as e:
+            print(f"Error loading last directory: {e}")
+        return ''
+
+    def save_last_used_directory(self, directory):
+        """Save the last used directory for file dialogs.
+        
+        Args:
+            directory (str): Directory path to save.
+        """
+        try:
+            settings = {}
+            if hasattr(self, 'settings_file'):
+                if os.path.exists(self.settings_file):
+                    try:
+                        with open(self.settings_file, 'r') as f:
+                            settings = json.load(f)
+                    except:
+                        # If file exists but is invalid, start with empty settings
+                        settings = {}
+                
+                settings['last_directory'] = directory
+                
+                with open(self.settings_file, 'w') as f:
+                    json.dump(settings, f)
+        except Exception as e:
+            print(f"Error saving last directory: {e}")
+
+    def _safely_connect_signal(self, signal, slot):
+        """Helper method to safely connect a signal to a slot, avoiding duplicates.
+        
+        Args:
+            signal: The Qt signal to connect
+            slot: The method to call when the signal is emitted
+            
+        Returns:
+            bool: True if connection was successful, False otherwise
+        """
+        if not signal:
+            print("Cannot connect: Signal is None")
+            return False
+            
+        # First try to disconnect any existing connection to avoid duplicates
+        try:
+            signal.disconnect(slot)
+            print(f"Disconnected existing signal connection to {slot.__name__}")
+        except (TypeError, RuntimeError):
+            # It's okay if there was no connection
+            pass
+            
+        # Now connect the signal
+        try:
+            signal.connect(slot)
+            print(f"Connected signal to {slot.__name__}")
+            return True
+        except Exception as e:
+            print(f"Error connecting signal: {e}")
+            return False
