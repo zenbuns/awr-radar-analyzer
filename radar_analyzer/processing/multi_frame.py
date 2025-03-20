@@ -34,6 +34,12 @@ def process_multi_frame_data(
         z_array: Z-coordinates of current point cloud.
         intensities_array: Intensity values of current point cloud.
     """
+    # Skip processing on most frames during collection from bag playback
+    if analyzer.collecting_data and hasattr(analyzer, 'is_playing') and analyzer.is_playing:
+        # Process only every 5th frame during bag playback collection
+        if analyzer.pcl_msg_count % 5 != 0:
+            return
+    
     # Create a copy of the current frame data
     current_frame = {
         'x': x_array.copy(),
@@ -60,14 +66,21 @@ def process_multi_frame_data(
     # 3. Add to buffer with proper limiting
     analyzer.frame_buffer.append(current_frame)
     
-    # Remove oldest frames to maintain size limit
-    while len(analyzer.frame_buffer) > min(analyzer.params.multi_frame_count, MAX_BUFFER_SIZE):
+    # Ensure buffer doesn't exceed maximum size
+    while len(analyzer.frame_buffer) > MAX_BUFFER_SIZE:
         analyzer.frame_buffer.pop(0)
     
-    # Only process if we have enough frames
+    # Enforce the actual multi-frame buffer size from parameters
+    while len(analyzer.frame_buffer) > analyzer.params.multi_frame_count:
+        analyzer.frame_buffer.pop(0)
+    
+    # Combine frames only if we have enough and not too often during collection
     if len(analyzer.frame_buffer) >= analyzer.params.multi_frame_count:
         combine_multi_frames(analyzer)
-        compute_multi_frame_metrics(analyzer)
+        
+        # Compute expensive metrics less frequently during collection
+        if not analyzer.collecting_data or analyzer.pcl_msg_count % 10 == 0:
+            compute_multi_frame_metrics(analyzer)
 
 
 def combine_multi_frames(analyzer) -> None:

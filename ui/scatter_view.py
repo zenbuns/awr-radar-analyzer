@@ -49,7 +49,7 @@ class ScatterView(QWidget):
         super().__init__(parent)
         
         # Default parameters
-        self.max_range = 35.0
+        self.max_range = 35.0  # Ensure max range is exactly 35.0 meters
         self.circle_interval = 10.0
         self.circle_distance = 5.0
         self.circle_radius = 0.5
@@ -92,20 +92,39 @@ class ScatterView(QWidget):
         # Create axis with a specific aspect ratio
         self.ax = self.figure.add_subplot(111)
         
-        # Set background colors
-        self.ax.set_facecolor(Colors.DARK_BACKGROUND)
-        self.figure.patch.set_facecolor(Colors.DARK_BACKGROUND)
+        # Set background colors - deeper scientific background
+        self.ax.set_facecolor('#050510')  # Deeper navy blue scientific background
+        self.figure.patch.set_facecolor('#050510')
         
-        # Set plot limits - ensure these are positive values
-        x_limit, y_limit = max(1.0, self.max_range), max(1.0, 2 * self.max_range)
-        self.ax.set_xlim(-x_limit, x_limit)
-        self.ax.set_ylim(0, y_limit)
+        # Set plot limits - use max_range directly for consistency
+        self.ax.set_xlim(-self.max_range, self.max_range)
+        self.ax.set_ylim(0, self.max_range)
         
-        # Set aspect ratio to auto to avoid aspect ratio errors
-        self.ax.set_aspect('auto')
+        # Use equal aspect ratio to keep circles circular
+        self.ax.set_aspect('equal')
         
-        # Add range arcs with improved styling
-        for r in range(0, int(y_limit) + 1, int(self.circle_interval)):
+        # Add polar grid with light lines for scientific precision
+        theta = np.linspace(0, np.pi, 100)
+        for r in range(0, int(self.max_range) + 1, 10):
+            if r == 0:
+                continue
+            x = r * np.sin(theta)
+            y = r * np.cos(theta)
+            self.ax.plot(x, y, color='#334455', linestyle='-', linewidth=0.3, alpha=0.3)
+        
+        # Define the interval for reference circles with scientific precision
+        circle_interval_m = 5  # 5m intervals for precision
+        major_ranges = list(range(0, int(self.max_range) + 1, circle_interval_m * 2))
+        minor_ranges = [
+            r for r in range(0, int(self.max_range) + 1, circle_interval_m)
+            if r not in major_ranges
+        ]
+        
+        # Add major range arcs with scientific styling
+        for r in major_ranges:
+            if r == 0:  # Skip the zero radius
+                continue
+                
             arc = Arc(
                 (0, 0),
                 width=2 * r,
@@ -114,58 +133,179 @@ class ScatterView(QWidget):
                 theta1=0,
                 theta2=180,
                 fill=False,
-                color=Colors.BORDER,
+                color='#AABBDD',  # Even lighter scientific blue-gray
                 linestyle='-',
-                linewidth=1.5,
-                alpha=0.8
+                linewidth=0.6,
+                alpha=0.6
             )
             self.ax.add_patch(arc)
-            if 0 < r <= self.max_range and r % (int(self.circle_interval) * 2) == 0:
-                self.ax.text(0, r, f"{int(r)}m", ha='right', va='bottom', 
-                             color=Colors.TEXT, fontsize=12, weight='bold')
+            
+            # Only label major circles
+            if 0 < r <= self.max_range:
+                self.ax.text(
+                    r * 0.05, r, f"{int(r)}m", ha='left', va='bottom', 
+                    color='#AABBDD', fontsize=7, weight='normal',
+                    bbox=dict(facecolor='#050510', edgecolor='none', 
+                             alpha=0.7, pad=1, boxstyle='round,pad=0.1')
+                )
         
-        # Create scatter plots with enhanced aesthetics
+        # Add minor range arcs with subtle scientific styling
+        for r in minor_ranges:
+            if r == 0:  # Skip the zero radius
+                continue
+                
+            arc = Arc(
+                (0, 0),
+                width=2 * r,
+                height=2 * r,
+                angle=0,
+                theta1=0,
+                theta2=180,
+                fill=False,
+                color='#7799CC',  # Lighter scientific blue
+                linestyle=':',
+                linewidth=0.3,
+                alpha=0.4
+            )
+            self.ax.add_patch(arc)
+        
+        # Add angle markers every 15 degrees for more precision (but skip previously excluded angles)
+        for angle in range(-90, 91, 15):
+            if angle == 0 or angle == -90 or angle == 90 or angle % 30 != 0:
+                # Skip 0, -90, 90 degrees and keep only 15° intervals not covered by 30° intervals
+                continue
+                
+            # Convert degrees to radians for calculations
+            angle_rad = np.radians(angle)
+            
+            # Calculate end points using parametric form
+            x_end = self.max_range * np.sin(angle_rad)
+            y_end = self.max_range * np.cos(angle_rad)
+            
+            # Draw angle line - thinner for 15° intervals
+            self.ax.plot(
+                [0, x_end], 
+                [0, y_end], 
+                linestyle=':',  # Dotted line for minor angles
+                color='#5566AA', 
+                linewidth=0.3, 
+                alpha=0.4
+            )
+        
+        # Add angle markers every 30 degrees with proper scientific labels
+        for angle in range(-90, 91, 30):
+            if angle == 0 or angle == -90 or angle == 90:
+                # Skip 0 degrees, handled with sensor indicator
+                # Skip -90 and 90 degrees per user request
+                continue
+                
+            # Convert degrees to radians for calculations
+            angle_rad = np.radians(angle)
+            
+            # Calculate end points using parametric form
+            x_end = self.max_range * np.sin(angle_rad)
+            y_end = self.max_range * np.cos(angle_rad)
+            
+            # Draw angle line
+            self.ax.plot(
+                [0, x_end], 
+                [0, y_end], 
+                linestyle='--', 
+                color='#7788BB', 
+                linewidth=0.5, 
+                alpha=0.6
+            )
+            
+            # Label at 80% of max range to avoid crowding
+            label_distance = 0.8 * self.max_range
+            x_label = label_distance * np.sin(angle_rad)
+            y_label = label_distance * np.cos(angle_rad)
+            
+            # Add angle label with scientific notation
+            self.ax.text(
+                x_label, y_label, f"{angle}°", 
+                color='#99BBDD',
+                fontsize=7,
+                ha='center', 
+                va='center',
+                bbox=dict(facecolor='#050510', edgecolor='none', alpha=0.7, boxstyle='round,pad=0.1')
+            )
+        
+        # Add enhanced radar crosshairs with tick marks
+        # Vertical line
+        self.ax.plot([0, 0], [0, self.max_range], color='#00DD88', alpha=0.4, linewidth=0.5)
+        
+        # Horizontal line segments with ticks every 5m
+        for x in range(-int(self.max_range), int(self.max_range)+1, 5):
+            if x == 0:
+                continue
+            tick_length = 0.5 if x % 10 == 0 else 0.25
+            self.ax.plot([x, x], [0, tick_length], color='#00DD88', alpha=0.3, linewidth=0.4)
+        
+        # Add professional sensor location indicator at origin
+        sensor_circle = Circle((0, 0), 0.5, fill=True, color='#00DDCC', alpha=0.7)
+        self.ax.add_patch(sensor_circle)
+        sensor_ring = Circle((0, 0), 0.7, fill=False, color='#00FFEE', linewidth=0.5, alpha=0.5)
+        self.ax.add_patch(sensor_ring)
+        
+        # Create scatter plots with enhanced aesthetics - increased contrast and viridis colormap
         self.components['scatter'] = self.ax.scatter(
-            [], [], s=25, c=[], cmap='plasma', alpha=1.0
+            [], [], s=22, c=[], cmap='viridis', alpha=1.0, vmin=0.0, vmax=1.0
         )
         
         # Create scatter plots and circles for each sampling circle
         self.components['sampling_circles'] = []
         self.components['circle_scatters'] = []
         
-        # Circle colors and positions with modern color scheme
+        # Circle colors and positions with enhanced scientific color scheme
         circle_configs = [
             {'enabled': True, 'distance': 5.0, 'radius': 0.5, 'angle': 0, 
-             'color': Colors.ACCENT_BLUE, 'label': 'Primary'},
+             'color': '#44DDFF', 'label': 'Primary'},
             {'enabled': False, 'distance': 15.0, 'radius': 0.5, 'angle': -60, 
-             'color': Colors.ACCENT_LAVENDER, 'label': 'Left'},
+             'color': '#77BBFF', 'label': 'Left'},
             {'enabled': False, 'distance': 25.0, 'radius': 0.5, 'angle': 60, 
-             'color': Colors.ACCENT_YELLOW, 'label': 'Right'}
+             'color': '#FFDD66', 'label': 'Right'}
         ]
         
+        # Create sampling circles with different positions and scientific styling
         for i, config in enumerate(circle_configs):
             # Calculate x position based on angle (convert degrees to radians)
             angle_rad = config['angle'] * (3.14159 / 180.0)
             x_pos = config['distance'] * np.sin(angle_rad)
             y_pos = config['distance'] * np.cos(angle_rad)
             
-            # Create circle scatter plot with better visibility
-            circle_scatter = self.ax.scatter([], [], s=30, c=config['color'], marker='x')
+            # Create circle scatter plot with precise scientific markers
+            circle_scatter = self.ax.scatter([], [], s=18, c=config['color'], marker='x', alpha=0.9)
             self.components[f'circle_scatter_{i}'] = circle_scatter
             self.components['circle_scatters'].append(circle_scatter)
             
-            # Create sampling circle with modern styling
+            # Create sampling circle with scientific styling
             sampling_circle = Circle(
                 (x_pos, y_pos),
                 config['radius'],
                 fill=False,
                 color=config['color'],
                 linestyle='-',
-                linewidth=2.5,  # Even thicker for better visibility
-                alpha=1.0 if config['enabled'] else 0.4,
+                linewidth=0.8,
+                alpha=0.8 if config['enabled'] else 0.3,
                 visible=config['enabled']
             )
             self.ax.add_patch(sampling_circle)
+            
+            # Add small targeting crosshairs at center of sampling circle
+            if config['enabled']:
+                crosshair_size = 0.3
+                self.ax.plot(
+                    [x_pos-crosshair_size, x_pos+crosshair_size], 
+                    [y_pos, y_pos], 
+                    color=config['color'], linewidth=0.4, alpha=0.6
+                )
+                self.ax.plot(
+                    [x_pos, x_pos], 
+                    [y_pos-crosshair_size, y_pos+crosshair_size], 
+                    color=config['color'], linewidth=0.4, alpha=0.6
+                )
+            
             self.components[f'sampling_circle_{i}'] = sampling_circle
             self.components['sampling_circles'].append({
                 'circle': sampling_circle,
@@ -174,43 +314,67 @@ class ScatterView(QWidget):
                 'y_pos': y_pos
             })
         
-        # Set labels and title with modern styling
-        self.ax.set_xlabel('X (m)', fontsize=14, labelpad=10, color=Colors.TEXT)
-        self.ax.set_ylabel('Y (m)', fontsize=14, labelpad=10, color=Colors.TEXT)
-        self.ax.set_title('Radar Point Cloud', fontsize=16, color=Colors.TEXT, weight='bold')
+        # Set labels and title with scientific radar terminology
+        self.ax.set_xlabel('Azimuth (m)', fontsize=9, labelpad=10, color='#BBDDFF')
+        self.ax.set_ylabel('Range (m)', fontsize=9, labelpad=10, color='#BBDDFF')
+        self.ax.set_title('Radar Point Cloud', fontsize=11, color='#DDEEFF', weight='normal')
         
-        # Configure ticks
-        self.ax.tick_params(axis='x', colors=Colors.TEXT, labelsize=12, width=1.5, length=6)
-        self.ax.tick_params(axis='y', colors=Colors.TEXT, labelsize=12, width=1.5, length=6)
+        # Configure ticks with scientific precision
+        self.ax.tick_params(axis='x', colors='#AABBDD', labelsize=8, width=1.0, length=4)
+        self.ax.tick_params(axis='y', colors='#AABBDD', labelsize=8, width=1.0, length=4)
         
-        # Set spine colors
+        # Set spine colors for scientific border
         for spine in self.ax.spines.values():
-            spine.set_color(Colors.BORDER)
-            spine.set_linewidth(1.5)
+            spine.set_color('#223344')
+            spine.set_linewidth(0.5)
         
-        # Add colorbar with improved aesthetics
+        # Add colorbar with enhanced scientific styling
         self.colorbar = self.figure.colorbar(
             self.components['scatter'],
             ax=self.ax,
-            label='Intensity',
-            fraction=0.03,  # Narrower
+            label='Signal Intensity (dB)',
+            fraction=0.03,
             pad=0.02
         )
-        self.colorbar.ax.yaxis.label.set_color(Colors.TEXT)
-        self.colorbar.ax.tick_params(colors=Colors.TEXT_MUTED)
+        self.colorbar.ax.yaxis.label.set_color('#BBDDFF')
+        self.colorbar.ax.tick_params(colors='#AACCEE')
         
-        # Add statistics text boxes with improved styling
+        # Add technical statistics box with enhanced resolution information
+        grid_size = int(2 * self.max_range)
+        res_text = (
+            f"Resolution: {1.0:.1f}m\n"
+            f"Range: 0-{self.max_range:.0f}m\n"
+            f"Sampling: adaptive\n"
+            f"Grid: {grid_size}×{grid_size} px"
+        )
+        
+        self.components['res_stats'] = self.ax.text(
+            0.98, 0.98, res_text,
+            transform=self.ax.transAxes,
+            color='#AABBDD',
+            fontsize=7,
+            ha='right',
+            va='top',
+            bbox=dict(
+                boxstyle='round,pad=0.2',
+                facecolor='#101025',
+                alpha=0.8,
+                edgecolor='#334466'
+            )
+        )
+        
+        # Add statistics text boxes with scientific notation
         self.components['stats_text'] = self.ax.text(
             0.02, 0.98, '',
             transform=self.ax.transAxes,
             verticalalignment='top',
-            fontsize=10,
-            color=Colors.TEXT,
+            fontsize=8,
+            color='#BBDDFF',
             bbox=dict(
-                boxstyle='round,pad=0.5',
-                facecolor=Colors.LIGHT_BACKGROUND,
+                boxstyle='round,pad=0.3',
+                facecolor='#101025',
                 alpha=0.8,
-                edgecolor=Colors.BORDER
+                edgecolor='#334466'
             )
         )
         
@@ -218,18 +382,18 @@ class ScatterView(QWidget):
             0.02, 0.8, '',
             transform=self.ax.transAxes,
             verticalalignment='top',
-            fontsize=10,
-            color=Colors.TEXT,
+            fontsize=8,
+            color='#BBDDFF',
             bbox=dict(
-                boxstyle='round,pad=0.5',
-                facecolor=Colors.LIGHT_BACKGROUND,
+                boxstyle='round,pad=0.3',
+                facecolor='#101025',
                 alpha=0.8,
-                edgecolor=Colors.ACCENT_BLUE
+                edgecolor='#334466'
             )
         )
         
-        # Enable grid for better readability
-        self.ax.grid(True, linestyle=':', linewidth=0.5, alpha=0.3, color=Colors.BORDER)
+        # Enable grid for scientific precision - very subtle
+        self.ax.grid(True, linestyle=':', linewidth=0.2, alpha=0.3, color='#223344')
         
         # Adjust layout
         self.figure.tight_layout()
@@ -391,26 +555,48 @@ class ScatterView(QWidget):
                             scatter.set_offsets(np.empty((0, 2)))
                             scatter.set_visible(False)
                 
-                # Update statistics text - compute once and reuse
+                # Update statistics text with enhanced scientific notation
                 distances = np.sqrt(np.square(x) + np.square(y))
                 bins = np.arange(0, self.max_range + self.circle_interval, self.circle_interval)
                 counts, _ = np.histogram(distances, bins=bins)
                 
-                # Format statistics text
-                stats = f"⬤ Total points: {len(x)}"
-                if len(x) < self.optimizer.max_points:
-                    stats += " (showing all)"
-                else:
-                    original_count = self.optimizer.last_point_count
-                    percent = int(100 * len(x) / max(1, original_count))
-                    stats += f" (showing {percent}%)"
+                # Calculate standard deviation for scientific metrics
+                if len(distances) > 1:
+                    mean_dist = np.mean(distances)
+                    std_dist = np.std(distances)
+                    median_dist = np.median(distances)
                     
-                stats += "\n"
-                
-                # Only include non-zero bins to keep text compact
-                for i in range(len(counts)):
-                    if counts[i] > 0:
-                        stats += f"⬤ {bins[i]:.0f}-{bins[i+1]:.0f}m: {counts[i]} pts\n"
+                    # Convert intensity to dB scale if non-zero
+                    if np.max(intensities) > 0:
+                        intensity_db = 10 * np.log10(np.mean(intensities) / 0.001)  # Ref: 0.001
+                    else:
+                        intensity_db = 0
+                    
+                    # Format statistics text with scientific notation
+                    stats = f"n = {len(x)}"
+                    if len(x) < self.optimizer.max_points:
+                        stats += " (complete)"
+                    else:
+                        original_count = self.optimizer.last_point_count
+                        percent = int(100 * len(x) / max(1, original_count))
+                        stats += f" (sample: {percent}%)"
+                    
+                    stats += f"\nμ = {mean_dist:.2f}m, σ = {std_dist:.2f}m\n"
+                    stats += f"Med. = {median_dist:.2f}m, Avg. Int. = {intensity_db:.1f}dB\n"
+                    
+                    # Only include non-zero bins to keep text compact (max 4 ranges)
+                    non_zero_bins = 0
+                    for i in range(len(counts)):
+                        if counts[i] > 0:
+                            if non_zero_bins < 4:  # Limit to 4 ranges for clarity
+                                stats += f"R{bins[i]:.0f}-{bins[i+1]:.0f}m: {counts[i]} pts\n"
+                                non_zero_bins += 1
+                            elif non_zero_bins == 4:
+                                stats += f"+ {sum(counts[i:])} pts in other ranges"
+                                break
+                else:
+                    stats = f"n = {len(x)}\nInsufficient data for statistics"
+                    
                 self.components['stats_text'].set_text(stats)
             else:
                 # Clear plots if no data - use empty arrays (more efficient)
@@ -424,6 +610,8 @@ class ScatterView(QWidget):
                 self.components['stats_text'].set_text("No data")
             
             # Use draw_idle for more efficient rendering
+            # Ensure aspect ratio is maintained
+            self.ax.set_aspect('equal')
             self.canvas.draw_idle()
             
         except Exception as e:
@@ -447,14 +635,25 @@ class ScatterView(QWidget):
                     if stats_text:
                         stats_text += "\n\n"
                     
+                    # Compute standard deviation and SNR if possible for scientific notation
+                    std_text = ""
+                    snr_text = ""
+                    if 'intensities' in stats and len(stats['intensities']) > 1:
+                        std_intensity = np.std(stats['intensities'])
+                        std_text = f", σ={std_intensity:.2f}"
+                        
+                        # Calculate SNR in dB if possible
+                        if np.mean(stats['intensities']) > 0.001:
+                            snr_db = 10 * np.log10(np.mean(stats['intensities']) / 0.001)
+                            snr_text = f"\n  SNR={snr_db:.1f}dB"
+                    
                     stats_text += (
-                        f"◆ {config['label']} ({config['distance']:.1f}m, r={config['radius']:.1f}m)\n"
-                        f"   Points: {stats.get('count', 0)}\n"
-                        f"   Avg Intensity: {stats.get('avg_intensity', 0):.2f}"
+                        f"• {config['label']} (r={config['radius']:.1f}m)\n"
+                        f"  n={stats.get('count', 0)}, μ={stats.get('avg_intensity', 0):.2f}{std_text}{snr_text}"
                     )
         
         if not stats_text:
-            stats_text = "No active circles"
+            stats_text = "No active sampling regions"
             
         self.components['circle_stats_text'].set_text(stats_text)
         self.canvas.draw_idle()

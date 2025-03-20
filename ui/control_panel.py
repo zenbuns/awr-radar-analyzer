@@ -946,7 +946,11 @@ class ControlPanel(QWidget):
             def __init__(self, orientation, parent=None):
                 super().__init__(orientation, parent)
                 self.parent_panel = parent
-            
+                self.setPageStep(5)  # Smaller page step for smoother navigation
+                self.setSingleStep(1)  # Smaller single step for finer control
+                # Track whether we're currently updating to avoid feedback loops
+                self.is_programmatic_update = False
+                
             def mousePressEvent(self, event):
                 if self.parent_panel:
                     self.parent_panel.timeline_dragging = True
@@ -954,9 +958,15 @@ class ControlPanel(QWidget):
             
             def mouseReleaseEvent(self, event):
                 if self.parent_panel:
-                    # Keep dragging true briefly to avoid immediate overwrite by signal
-                    QTimer.singleShot(100, lambda: setattr(self.parent_panel, 'timeline_dragging', False))
+                    # Delay setting dragging to False to avoid immediate overwrite by signal
+                    QTimer.singleShot(150, lambda: setattr(self.parent_panel, 'timeline_dragging', False))
                 super().mouseReleaseEvent(event)
+                
+            def setValue(self, value):
+                """Override setValue to track programmatic updates."""
+                self.is_programmatic_update = True
+                super().setValue(value)
+                self.is_programmatic_update = False
         
         self.timeline_slider = TimelineSlider(Qt.Horizontal, self)
         self.timeline_slider.setEnabled(False)  # Initially disabled until bag is loaded
@@ -1752,10 +1762,40 @@ class ControlPanel(QWidget):
             seconds = int((position * 60 - minutes) * 60)
             self.timestamp_label.setText(f"{minutes:02d}:{seconds:02d} / 60:00")
         
-        # Only emit the seek signal if the user is actually dragging the slider
-        # This prevents feedback loops when the slider is updated programmatically
+        # Check if slider update is from user interaction (not programmatic)
         if self.timeline_dragging:
-            self.timeline_position_changed.emit(position)
+            # Throttle seek events during dragging by using a timer
+            if not hasattr(self, '_last_seek_time'):
+                self._last_seek_time = 0
+                self._pending_seek_position = None
+                
+            current_time = time.time()
+            elapsed = current_time - self._last_seek_time
+            
+            # Only send a seek event every 100ms during dragging to avoid overwhelming the system
+            if elapsed >= 0.1:  # 100ms
+                self._last_seek_time = current_time
+                self.timeline_position_changed.emit(position)
+                self._pending_seek_position = None
+            else:
+                # Store the position for sending when the timer elapses
+                self._pending_seek_position = position
+                
+                # If we haven't set up a timer yet, set one up to send the final position
+                if not hasattr(self, '_seek_timer'):
+                    self._seek_timer = QTimer()
+                    self._seek_timer.setSingleShot(True)
+                    self._seek_timer.timeout.connect(self._send_pending_seek)
+                
+                # Restart the timer for 100ms
+                self._seek_timer.start(100)
+    
+    def _send_pending_seek(self):
+        """Send the pending seek position if available."""
+        if hasattr(self, '_pending_seek_position') and self._pending_seek_position is not None:
+            self.timeline_position_changed.emit(self._pending_seek_position)
+            self._pending_seek_position = None
+            self._last_seek_time = time.time()
     
     def on_visualize_pointcloud(self):
         """Handle visualize point cloud button."""

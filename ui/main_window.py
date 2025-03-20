@@ -18,6 +18,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSlot, QSize, QUrl, QThread, pyqtSignal
 from PyQt5.QtGui import QIcon, QPixmap, QFont, QDesktopServices
+import time
 
 from ui.scatter_view import ScatterView
 from ui.heatmap_view import HeatmapView
@@ -1997,9 +1998,35 @@ class MainWindow(QMainWindow):
             if hasattr(self, 'control_panel') and hasattr(self.control_panel, 'timeline_slider'):
                 # Check if the user is currently dragging the slider
                 if not getattr(self.control_panel, 'timeline_dragging', False):
-                    # Convert position to slider value (0-100)
-                    slider_val = int(position * 100)
-                    self.control_panel.timeline_slider.setValue(slider_val)
+                    # Store the last position and current time if not already set
+                    if not hasattr(self, '_last_position'):
+                        self._last_position = 0.0
+                        self._last_position_time = time.time()
+                        self._target_position = position
+                    else:
+                        # Store the target position for smoother updates
+                        self._target_position = position
+                    
+                    # Calculate elapsed time since last update
+                    current_time = time.time()
+                    elapsed = current_time - self._last_position_time
+                    
+                    # Only update at most 30 times per second for smoother appearance
+                    if elapsed >= 1.0 / 30.0:
+                        # Calculate how much to move toward the target position
+                        # Higher smoothing factor = faster movement
+                        smoothing_factor = min(elapsed * 5.0, 1.0)  # Adjust smoothing based on time passed
+                        
+                        # Interpolate between current and target position
+                        new_position = self._last_position + (self._target_position - self._last_position) * smoothing_factor
+                        
+                        # Convert position to slider value (0-100)
+                        slider_val = int(new_position * 100)
+                        self.control_panel.timeline_slider.setValue(slider_val)
+                        
+                        # Update stored position
+                        self._last_position = new_position
+                        self._last_position_time = current_time
                     
                     # If the analyzer has bag duration info, update that in the control panel
                     if hasattr(self.analyzer, 'bag_duration') and self.analyzer.bag_duration > 0:
