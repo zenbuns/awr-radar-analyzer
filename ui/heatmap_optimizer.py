@@ -35,6 +35,8 @@ class HeatmapOptimizer:
         self.frame_counter = 0
         self.last_draw_time = 0
         self.max_fps = 30  # maximum frames per second
+        self.startup_phase = True  # Special flag for startup phase
+        self.startup_frames = 10   # Number of frames to always render during startup
         
     def should_update_heatmap(self, data):
         """
@@ -49,8 +51,22 @@ class HeatmapOptimizer:
         current_time = time.time()
         self.frame_counter += 1
         
-        # Check update interval
-        if current_time - self.last_update_time < self.update_interval:
+        # TEMPORARY: Until we get basic rendering working, disable most optimizations
+        # Always update the first 100 frames to ensure data appears
+        if self.frame_counter <= 100:
+            self.last_update_time = current_time
+            return True
+        
+        # During startup phase, always update for the first few frames
+        if self.startup_phase and self.frame_counter <= self.startup_frames:
+            # After startup_frames frames, exit startup phase
+            if self.frame_counter == self.startup_frames:
+                self.startup_phase = False
+            self.last_update_time = current_time
+            return True
+        
+        # Check update interval - use a very short interval for now
+        if current_time - self.last_update_time < 0.01:  # 10ms instead of 100ms
             return False
             
         # Check for meaningful data changes (compute fast hash)
@@ -61,10 +77,10 @@ class HeatmapOptimizer:
         else:
             data_fingerprint = 0
             
-        # Skip update if data hasn't changed significantly
+        # Skip update if data hasn't changed significantly - update more frequently
         if data_fingerprint == self.last_data_hash:
-            # Only perform occasional "heartbeat" updates (every 10 frames)
-            if self.frame_counter % 10 != 0:
+            # Only perform occasional "heartbeat" updates (every 5 frames instead of 10)
+            if self.frame_counter % 5 != 0:
                 return False
         
         # Update tracking state
@@ -81,6 +97,10 @@ class HeatmapOptimizer:
         Returns:
             bool: True if contours should be updated, False otherwise.
         """
+        # Always update during startup phase
+        if self.startup_phase and self.frame_counter <= self.startup_frames:
+            return True
+            
         current_time = time.time()
         if current_time - self.last_contour_time < self.contour_interval:
             return False
@@ -97,13 +117,7 @@ class HeatmapOptimizer:
         Returns:
             bool: True if canvas should be redrawn, False otherwise.
         """
-        current_time = time.time()
-        min_frame_time = 1.0 / self.max_fps
-        
-        if current_time - self.last_draw_time < min_frame_time:
-            return False
-            
-        self.last_draw_time = current_time
+        # TEMPORARY: Always redraw until we get basic rendering working
         return True
     
     def set_update_interval(self, interval):

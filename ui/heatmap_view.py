@@ -298,6 +298,11 @@ class HeatmapView(QWidget):
         Args:
             heatmap_data: New 2D numpy array of heatmap data.
         """
+        # Verify that we have valid data
+        if heatmap_data is None or heatmap_data.size == 0:
+            # If no data, don't update anything
+            return
+            
         # Store the newest data regardless of whether we update the display
         self.heatmap_data = heatmap_data
         
@@ -309,15 +314,22 @@ class HeatmapView(QWidget):
         data_thresholded = heatmap_data.copy()
         data_thresholded[data_thresholded < self.noise_floor] = 0
         
+        # Make sure the heatmap component exists
+        if 'heatmap' not in self.components or self.components['heatmap'] is None:
+            # If missing, recreate the plot
+            self.setup_plot()
+            
         # Update display based on visualization mode - pass optimizer state for contour decisions
         self._update_visualization_mode(data_thresholded, redraw=self.optimizer.should_redraw())
         
         # Update SNR with formatting improvements
         if np.max(data_thresholded) > 0:
             snr = 10.0 * np.log10(np.max(data_thresholded) / self.noise_floor)
-            self.components['snr_text'].set_text(f'SNR: {snr:.1f} dB')
+            if 'snr_text' in self.components:
+                self.components['snr_text'].set_text(f'SNR: {snr:.1f} dB')
         else:
-            self.components['snr_text'].set_text('SNR: N/A')
+            if 'snr_text' in self.components:
+                self.components['snr_text'].set_text('SNR: N/A')
         
         # Only redraw if necessary according to the optimizer
         if self.optimizer.should_redraw():
@@ -333,6 +345,11 @@ class HeatmapView(QWidget):
             redraw: Whether to redraw the canvas.
         """
         try:
+            # Make sure we have valid components before updating
+            if 'heatmap' not in self.components or self.components['heatmap'] is None:
+                self.setup_plot()
+                return
+                
             # Update colormap normalization
             nonzero_values = data[data > 0]
             if nonzero_values.size > 0:
@@ -356,8 +373,13 @@ class HeatmapView(QWidget):
             # Always update the heatmap data which is relatively fast
             self.components['heatmap'].set_data(data)
             
+            # Ensure heatmap is visible based on visualization mode
+            self.components['heatmap'].set_visible(self.visualization_mode in ['heatmap', 'combined'])
+            alpha = 0.85 if self.visualization_mode == 'heatmap' else 0.5
+            self.components['heatmap'].set_alpha(alpha)
+            
             # Clear existing contours
-            if self.components['contour'] is not None:
+            if 'contour' in self.components and self.components['contour'] is not None:
                 for coll in self.components['contour'].collections:
                     try:
                         coll.remove()
@@ -370,20 +392,20 @@ class HeatmapView(QWidget):
                 # Only generate contours if we have enough data
                 nonzero_count = np.count_nonzero(data)
                 if nonzero_count > 20:  # Skip if too few points
-                    levels = np.linspace(self.noise_floor, np.max(data), 6)
-                    # Create contours only if we have valid levels
-                    if levels.size > 1 and levels[-1] > levels[0]:
-                        self.components['contour'] = self.ax.contour(
-                            data,
-                            levels=levels,
-                            extent=[-self.max_range, self.max_range, -self.max_range, self.max_range],
-                            colors='white' if self.visualization_mode == 'combined' else 'black',
-                            alpha=0.5,
-                            linewidths=0.5
-                        )
-            
-            # Set visibility of heatmap based on mode
-            self.components['heatmap'].set_visible(self.visualization_mode in ['heatmap', 'combined'])
+                    try:
+                        levels = np.linspace(self.noise_floor, np.max(data), 6)
+                        # Create contours only if we have valid levels
+                        if levels.size > 1 and levels[-1] > levels[0]:
+                            self.components['contour'] = self.ax.contour(
+                                data,
+                                levels=levels,
+                                extent=[-self.max_range, self.max_range, -self.max_range, self.max_range],
+                                colors='white' if self.visualization_mode == 'combined' else 'black',
+                                alpha=0.5,
+                                linewidths=0.5
+                            )
+                    except Exception as e:
+                        print(f"Error creating contours: {e}")
             
         except Exception as e:
             print(f"Error updating visualization: {e}")
