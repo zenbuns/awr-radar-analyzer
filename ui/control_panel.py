@@ -24,6 +24,8 @@ from radar_analyzer.utils.ros_bag_handler import play_rosbag, record_rosbag, sto
 import time
 import glob
 from PyQt5.QtWidgets import QApplication
+import numpy as np
+import math
 
 
 class ControlPanel(QWidget):
@@ -1426,6 +1428,11 @@ class ControlPanel(QWidget):
             analyzer = self.main_window.analyzer
             if analyzer:
                 try:
+                    # Force a hard reset of PCL data before playing bag to ensure clean state
+                    if hasattr(analyzer, 'hard_reset_pcl'):
+                        print("Performing hard reset of PCL data before bag playback")
+                        analyzer.hard_reset_pcl()
+                        
                     # Call play_rosbag directly on the analyzer with the loop parameter
                     from radar_analyzer.utils.ros_bag_handler import play_rosbag
                     play_rosbag(analyzer, bag_path, loop)
@@ -1458,11 +1465,53 @@ class ControlPanel(QWidget):
                         with analyzer.data_lock:
                             analyzer.experiment_data.clear()
                             print("Experiment data cleared successfully with lock")
+                            
+                            # Reset current data for circles to prevent stale data
+                            if hasattr(analyzer, 'current_data'):
+                                analyzer.current_data['circle_x'] = np.array([], dtype=np.float32)
+                                analyzer.current_data['circle_y'] = np.array([], dtype=np.float32)
+                                analyzer.current_data['circle_intensities'] = np.array([], dtype=np.float32)
+                                analyzer.current_data['circle_indices'] = np.array([], dtype=np.int32)
+                                
+                                # Also clear additional circles if they exist
+                                if hasattr(analyzer, 'params') and hasattr(analyzer.params, 'circles'):
+                                    for i in range(1, len(analyzer.params.circles)):
+                                        circle_key = f'circle{i+1}'
+                                        analyzer.current_data[f'{circle_key}_x'] = np.array([], dtype=np.float32)
+                                        analyzer.current_data[f'{circle_key}_y'] = np.array([], dtype=np.float32)
+                                        analyzer.current_data[f'{circle_key}_intensities'] = np.array([], dtype=np.float32)
+                                        analyzer.current_data[f'{circle_key}_indices'] = np.array([], dtype=np.int32)
+                                print("Circle ROI data cleared successfully")
                     else:
                         analyzer.experiment_data.clear()
                         print("Warning: Experiment data cleared without lock")
                 except Exception as e:
                     print(f"Error clearing experiment data: {e}")
+                    
+            # Ensure circle distance matches target distance
+            if analyzer and hasattr(analyzer, 'params'):
+                try:
+                    target_dist = float(target_distance)
+                    print(f"Setting circle distance to match target distance: {target_dist}")
+                    
+                    # Update primary circle distance
+                    analyzer.params.circle_distance = target_dist
+                    
+                    # Update all enabled circles
+                    if hasattr(analyzer.params, 'circles') and len(analyzer.params.circles) > 0:
+                        analyzer.params.circles[0].distance = target_dist
+                        
+                        # Update cached circle center for immediate effect
+                        if hasattr(analyzer, '_cached_circle_center'):
+                            # Calculate based on angle
+                            angle_rad = math.radians(analyzer.params.circles[0].angle)
+                            circle_center_x = target_dist * math.sin(angle_rad)
+                            circle_center_y = target_dist * math.cos(angle_rad)
+                            analyzer._cached_circle_center = np.array([circle_center_x, circle_center_y])
+                            print(f"Updated circle center to: [{circle_center_x:.2f}, {circle_center_y:.2f}]")
+                            
+                except Exception as e:
+                    print(f"Error updating circle distance: {e}")
         
         # Use bag duration if available, otherwise use default value
         if analyzer and hasattr(analyzer, 'bag_duration') and analyzer.bag_duration > 0:
@@ -1546,6 +1595,13 @@ class ControlPanel(QWidget):
         # Process UI updates immediately
         QApplication.processEvents()
         
+        # Force a hard reset of PCL data to ensure circle ROI data is cleared
+        if self.main_window and hasattr(self.main_window, 'analyzer'):
+            analyzer = self.main_window.analyzer
+            if hasattr(analyzer, 'hard_reset_pcl'):
+                print("Forcing hard reset of PCL data to clear circle ROI data")
+                analyzer.hard_reset_pcl()
+        
         # If we were generating data, stop collection and disable checkbox
         if self.generate_from_bag_check.isChecked():
             print("Stopping data collection due to bag playback ending")
@@ -1589,8 +1645,16 @@ class ControlPanel(QWidget):
         """Reset the point counter display and tracking state."""
         self.last_point_count = 0
         self.point_update_counter = 0
-        self.points_collected_label.setText("Points: 0")
-        print("Point counter reset")
+        
+        # Keep track of whether we're in collection mode
+        collection_active = hasattr(self, 'collection_start_time') and self.collection_start_time is not None
+        
+        # Only reset display if we're not actively collecting data
+        if not collection_active:
+            self.points_collected_label.setText("Points: 0")
+            print("Point counter reset")
+        else:
+            print("Point counter tracking reset, but display preserved during active collection")
     
     def on_timeline_changed(self, value):
         """Handle timeline slider value change.
@@ -1822,6 +1886,8 @@ class ControlPanel(QWidget):
         # Get the actual points count from the analyzer - ONLY trust actual data with thread safety
         display_text = None  # Only set if value changes
         points = -1  # Invalid value to detect if it was set
+        target_band_points = -1  # Count points at the target distance band
+        distance_bands = {}  # Store all distance bands
         
         try:
             # Use the direct reference to the main window
@@ -1832,8 +1898,42 @@ class ControlPanel(QWidget):
                 if hasattr(analyzer, 'data_lock'):
                     # Use a separate variable to track if we got points safely
                     with analyzer.data_lock:
+                        # Get total points count
                         if hasattr(analyzer, 'experiment_data') and hasattr(analyzer.experiment_data, 'x_points'):
                             points = len(analyzer.experiment_data.x_points)
+                            
+                            # Get distance band information if available in metadata
+                            if hasattr(analyzer.experiment_data, 'metadata'):
+                                metadata = getattr(analyzer.experiment_data, 'metadata', {})
+                                if 'distance_bands' in metadata:
+                                    distance_bands = metadata.get('distance_bands', {})
+                                    target_band = metadata.get('target_band', '')
+                                    target_band_points = metadata.get('target_band_count', 0)
+                            
+                            # Add debug logging to track current circle points
+                            if hasattr(analyzer, 'current_data'):
+                                circle_points = len(analyzer.current_data.get('circle_x', []))
+                                current_bands = analyzer.current_data.get('circle_distance_bands', {})
+                                
+                                if current_bands:
+                                    band_str = ", ".join([f"{k}: {v['count']}" for k, v in current_bands.items()])
+                                    print(f"DEBUG - Current frame bands: {band_str}")
+                                    
+                                # Get target distance and corresponding band
+                                target_dist = analyzer.params.target_distance
+                                target_band_width = 1.0  # 1-meter bands
+                                target_band_start = int(np.floor(target_dist))
+                                target_band_key = f"{target_band_start}m-{target_band_start + target_band_width}m"
+                                
+                                # Check for current frame target band count
+                                target_band_current = 0
+                                if target_band_key in current_bands:
+                                    target_band_current = current_bands[target_band_key]['count']
+                                
+                                print(f"DEBUG - Circle points in current frame: {circle_points}, " +
+                                      f"Target band ({target_band_key}): {target_band_current}, " +
+                                      f"Total accumulated points: {points}, " +
+                                      f"Progress: {progress}%")
                 else:
                     # Log a warning but DON'T try to access experiment_data without a lock
                     print("WARNING: No data_lock available for thread safety! Cannot reliably read point count.")
@@ -1849,7 +1949,24 @@ class ControlPanel(QWidget):
         if points != -1:
             # Every 10th update or when count changes
             if points != self.last_point_count or self.point_update_counter >= 10:
-                display_text = f"Points: {points}"
+                # Show total point count and target band points if available
+                if target_band_points > 0:
+                    target_dist = self.main_window.analyzer.params.target_distance
+                    target_band_width = 1.0
+                    target_band = f"{int(target_dist)}m-{int(target_dist)+target_band_width}m"
+                    display_text = f"Points: {points} (Target {target_band}: {target_band_points})"
+                else:
+                    display_text = f"Points: {points}"
+                
+                # Add distance band breakdown if we have it
+                if distance_bands and self.point_update_counter >= 20:
+                    band_info = []
+                    for band, count in sorted(distance_bands.items()):
+                        if count > 0:
+                            band_info.append(f"{band}: {count}")
+                    if band_info:
+                        print(f"Distance bands: {', '.join(band_info)}")
+                
                 self.last_point_count = points
                 self.point_update_counter = 0
                 

@@ -30,6 +30,31 @@ def generate_comparison_report(analyzer) -> str:
         analyzer.get_logger().warn("No data available for report generation")
         return None
 
+    # Add debug logging to show available data
+    analyzer.get_logger().info(f"Generating report with {len(analyzer.config_results)} configurations")
+    for config, distances in analyzer.config_results.items():
+        analyzer.get_logger().info(f"Config: {config} with {len(distances)} distances")
+        for distance, results in distances.items():
+            analyzer.get_logger().info(f"  Distance: {distance}m")
+            
+            # Log all top-level keys for debugging
+            analyzer.get_logger().info(f"  Available keys: {', '.join(results.keys())}")
+            
+            # Log specific ROI-related keys if they exist
+            roi_keys = [k for k in results.keys() if 'roi' in k.lower()]
+            if roi_keys:
+                analyzer.get_logger().info(f"  ROI-related keys: {', '.join(roi_keys)}")
+            
+            # Check if multi_frame_metrics exists and log its keys
+            if 'multi_frame_metrics' in results and results['multi_frame_metrics']:
+                mf_keys = results['multi_frame_metrics'].keys()
+                analyzer.get_logger().info(f"  Multi-frame metrics keys: {', '.join(mf_keys)}")
+                
+                # Log ROI-specific metrics if they exist
+                mf_roi_keys = [k for k in mf_keys if 'roi' in k.lower()]
+                if mf_roi_keys:
+                    analyzer.get_logger().info(f"  Multi-frame ROI keys: {', '.join(mf_roi_keys)}")
+
     # Load the latest multi-frame metrics from json files
     has_multi_frame_data = load_latest_multi_frame_metrics(analyzer)
 
@@ -67,6 +92,8 @@ def generate_comparison_report(analyzer) -> str:
                         <th>Configuration</th>
                         <th>Target Distance</th>
                         <th>Total Points</th>
+                        <th>Primary ROI</th>
+                        <th>Outside ROI</th>
                         <th>Point Density</th>
                         <th>Avg. Intensity</th>
                     </tr>
@@ -76,6 +103,8 @@ def generate_comparison_report(analyzer) -> str:
                 for distance, results in distances.items():
                     points = results.get('circle_points', 0)
                     avg_intensity = results.get('circle_avg_intensity', 0)
+                    roi_points = results.get('roi_combined_point_count', 0)
+                    outside_roi_points = results.get('outside_roi_combined_point_count', 0)
                     circle_area = np.pi * analyzer.params.circle_radius**2
                     if circle_area == 0:
                         density = 0
@@ -87,6 +116,8 @@ def generate_comparison_report(analyzer) -> str:
                             <td>{config}</td>
                             <td>{distance}m</td>
                             <td>{points}</td>
+                            <td>{roi_points}</td>
+                            <td>{outside_roi_points}</td>
                             <td>{density:.2f} pts/m²</td>
                             <td>{avg_intensity:.2f}</td>
                         </tr>
@@ -111,20 +142,49 @@ def generate_comparison_report(analyzer) -> str:
                                 <tr>
                                     <th>Distance Band</th>
                                     <th>Points</th>
+                                    <th>Percentage</th>
                                     <th>Avg. Intensity</th>
                                 </tr>
                     """)
 
                     distance_bands = results.get('distance_bands', {})
+                    target_band = results.get('target_band', '')
+                    target_band_count = results.get('target_band_points', 0)
+                    total_count = results.get('total_points', 0)
+                    
+                    # Check for metadata with more accurate distance band information
+                    if 'metadata' in results:
+                        metadata = results.get('metadata', {})
+                        if 'distance_bands' in metadata:
+                            # Use the more detailed metadata information
+                            distance_bands = metadata.get('distance_bands', {})
+                            target_band = metadata.get('target_band', target_band)
+                            target_band_count = metadata.get('target_band_count', target_band_count)
+                            total_count = metadata.get('total_count', total_count)
+                    
                     for band, band_data in distance_bands.items():
                         highlight = ''
-                        if band == results.get('target_band', ''):
-                            highlight = 'style="background-color: #ffffcc;"'
+                        count = 0
+                        avg_intensity = 0
+                        
+                        # Handle both dictionary and scalar values
+                        if isinstance(band_data, dict):
+                            count = band_data.get('count', 0)
+                            avg_intensity = band_data.get('avg_intensity', 0)
+                        else:
+                            count = band_data  # If band_data is just the count
+                            
+                        percentage = (count / total_count * 100) if total_count > 0 else 0
+                        
+                        if band == target_band:
+                            highlight = 'style="background-color: #ffffcc; font-weight: bold;"'
+                            
                         f.write(f"""
                             <tr {highlight}>
                                 <td>{band}</td>
-                                <td>{band_data.get('count', 0):.0f}</td>
-                                <td>{band_data.get('avg_intensity', 0):.2f}</td>
+                                <td>{count:.0f}</td>
+                                <td>{percentage:.1f}%</td>
+                                <td>{avg_intensity:.2f}</td>
                             </tr>
                         """)
 
@@ -144,6 +204,32 @@ def generate_comparison_report(analyzer) -> str:
                     <div class="chart-container">
                         <h3>Configuration: {config_name}</h3>
                         <p>Method: {analyzer.params.multi_frame_method}, Frames Combined: 10</p>
+                        
+                        <h4>ROI Analysis</h4>
+                        <table>
+                            <tr>
+                                <th>ROI Type</th>
+                                <th>Points</th>
+                                <th>Avg Pts/Frame</th>
+                                <th>Density</th>
+                                <th>SNR</th>
+                            </tr>
+                            <tr>
+                                <td>Primary ROI</td>
+                                <td>{metrics.get('roi_combined_point_count', 0)}</td>
+                                <td>{metrics.get('roi_avg_single_frame_count', 0):.1f}</td>
+                                <td>{metrics.get('roi_spatial_density', 0):.2f}</td>
+                                <td>{metrics.get('roi_snr_db', 0):.1f} dB</td>
+                            </tr>
+                            <tr>
+                                <td>Outside ROI</td>
+                                <td>{metrics.get('outside_roi_combined_point_count', 0)}</td>
+                                <td>{metrics.get('outside_roi_avg_single_frame_count', 0):.1f}</td>
+                                <td>{metrics.get('outside_roi_spatial_density', 0):.2f}</td>
+                                <td>{metrics.get('outside_roi_snr_db', 0):.1f} dB</td>
+                            </tr>
+                        </table>
+                        
                         <table>
                             <tr>
                                 <th>Metric</th>

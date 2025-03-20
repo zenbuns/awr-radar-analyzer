@@ -246,17 +246,28 @@ class RadarPointCloudAnalyzer(Node):
         if hasattr(self, 'is_playing') and self.is_playing:
             self.visible = True  # Ensure visibility during playback
         
-        # Process point cloud data message
+        # Process point cloud data message - do this once to avoid duplicate processing
         try:
             points_list = list(pc2.read_points(
                 msg, field_names=("x", "y", "z", "intensity"), skip_nans=True
             ))
-            self.get_logger().debug(f"Received point cloud with {len(points_list)} points")
             
-            # Handle empty point cloud gracefully
             if not points_list:
                 self.get_logger().debug("Empty point cloud received")
                 return
+                
+            # Extract data once to avoid duplication
+            raw_x = [p[0] for p in points_list]
+            raw_y = [p[1] for p in points_list]
+            raw_z = [p[2] for p in points_list]
+            intensities = [p[3] for p in points_list]
+
+            # Convert to numpy arrays for performance
+            x_array = np.array(raw_y, dtype=np.float32)
+            y_array = np.array(raw_x, dtype=np.float32)
+            z_array = np.array(raw_z, dtype=np.float32)
+            intensities_array = np.array(intensities, dtype=np.float32)
+            
         except Exception as e:
             self.get_logger().error(f"Error processing point cloud: {str(e)}")
             return
@@ -306,10 +317,7 @@ class RadarPointCloudAnalyzer(Node):
             # Log details every 20 frames to avoid excessive logging
             if self.pcl_msg_count % 20 == 0:
                 self.get_logger().info(f"Received point cloud frame {self.pcl_msg_count} during bag playback")
-                points = list(pc2.read_points(
-                    msg, field_names=("x", "y", "z", "intensity"), skip_nans=True
-                ))
-                self.get_logger().info(f"  - Point cloud contains {len(points)} points")
+                self.get_logger().info(f"  - Point cloud contains {len(points_list)} points")
         
         if not self.visible and not self.collecting_data:
             return  # Skip processing if not needed for visualization or collection
@@ -320,27 +328,10 @@ class RadarPointCloudAnalyzer(Node):
             return  # Rate limiting for visualization updates
 
         self.last_update_time = current_time
-
+        
+        # Process point cloud data with proper locking
         try:
             with self.data_lock:
-                points_list = list(pc2.read_points(
-                    msg, field_names=("x", "y", "z", "intensity"), skip_nans=True
-                ))
-                if not points_list:
-                    return
-
-                # Extract and swap x/y for desired visualization orientation
-                raw_x = [p[0] for p in points_list]
-                raw_y = [p[1] for p in points_list]
-                raw_z = [p[2] for p in points_list]
-                intensities = [p[3] for p in points_list]
-
-                # Convert to numpy arrays for performance
-                x_array = np.array(raw_y, dtype=np.float32)
-                y_array = np.array(raw_x, dtype=np.float32)
-                z_array = np.array(raw_z, dtype=np.float32)
-                intensities_array = np.array(intensities, dtype=np.float32)
-
                 self.current_data['x'] = x_array
                 self.current_data['y'] = y_array
                 self.current_data['z'] = z_array
@@ -373,7 +364,7 @@ class RadarPointCloudAnalyzer(Node):
                         self.stop_data_collection()
 
         except Exception as e:
-            self.get_logger().error(f"Error processing point cloud: {str(e)}")
+            self.get_logger().error(f"Error in point cloud processing: {str(e)}")
 
     def track_array_callback(self, msg: MarkerArray) -> None:
         """
@@ -724,7 +715,43 @@ class RadarPointCloudAnalyzer(Node):
             
             # Add multi-frame metrics if available
             if self.experiment_data.multi_frame_metrics:
-                results_dict['multi_frame_metrics'] = self.experiment_data.multi_frame_metrics
+                results_dict['multi_frame_metrics'] = self.experiment_data.multi_frame_metrics.copy()
+                
+                # Copy ROI-specific metrics to the top level for easier access in reports
+                if 'roi_combined_point_count' in self.experiment_data.multi_frame_metrics:
+                    results_dict['roi_combined_point_count'] = self.experiment_data.multi_frame_metrics['roi_combined_point_count']
+                    results_dict['roi_avg_single_frame_count'] = self.experiment_data.multi_frame_metrics.get('roi_avg_single_frame_count', 0)
+                    results_dict['roi_spatial_density'] = self.experiment_data.multi_frame_metrics.get('roi_spatial_density', 0)
+                    results_dict['roi_snr_db'] = self.experiment_data.multi_frame_metrics.get('roi_snr_db', 0)
+                
+                # Also include outside ROI metrics at top level
+                if 'outside_roi_combined_point_count' in self.experiment_data.multi_frame_metrics:
+                    results_dict['outside_roi_combined_point_count'] = self.experiment_data.multi_frame_metrics['outside_roi_combined_point_count']
+                    results_dict['outside_roi_avg_single_frame_count'] = self.experiment_data.multi_frame_metrics.get('outside_roi_avg_single_frame_count', 0)
+                    results_dict['outside_roi_spatial_density'] = self.experiment_data.multi_frame_metrics.get('outside_roi_spatial_density', 0)
+                    results_dict['outside_roi_snr_db'] = self.experiment_data.multi_frame_metrics.get('outside_roi_snr_db', 0)
+                
+                self.get_logger().info(f"Added multi-frame metrics with {len(self.experiment_data.multi_frame_metrics)} keys")
+                
+                # Log available ROI metrics keys for debugging
+                roi_keys = [k for k in self.experiment_data.multi_frame_metrics.keys() if k.startswith('roi')]
+                if roi_keys:
+                    self.get_logger().info(f"ROI metric keys: {', '.join(roi_keys)}")
+            
+            # Add metadata if available
+            if hasattr(self.experiment_data, 'metadata') and self.experiment_data.metadata:
+                # Make a deep copy to avoid overwriting 
+                results_dict['metadata'] = dict(self.experiment_data.metadata)
+                
+                # Use more accurate metadata info for target band if available
+                if 'target_band' in self.experiment_data.metadata:
+                    results_dict['target_band'] = self.experiment_data.metadata['target_band']
+                if 'target_band_count' in self.experiment_data.metadata:
+                    results_dict['target_band_points'] = self.experiment_data.metadata['target_band_count']
+                
+                self.get_logger().info(f'Using detailed metadata with {len(self.experiment_data.metadata)} keys')
+                # Log keys found in metadata for debugging
+                self.get_logger().info(f'Metadata keys: {", ".join(self.experiment_data.metadata.keys())}')
             
             self.config_results[self.params.current_config][int(self.params.target_distance)] = results_dict
 
@@ -733,6 +760,15 @@ class RadarPointCloudAnalyzer(Node):
             )
             self.get_logger().info(f'Total points in sampling circle: {circle_counts}')
             self.get_logger().info(f'Average intensity in sampling circle: {circle_avg_intensity:.2f}')
+            
+            # Log target band information if available
+            target_band_points = results_dict.get('target_band_points', 0)
+            if target_band_points > 0:
+                self.get_logger().info(
+                    f'Points in target band {target_band_key}: {target_band_points} '
+                    f'({target_band_points/circle_counts*100:.1f}% of total)'
+                )
+                
         except Exception as e:
             self.get_logger().error(f"Error analyzing experiment data: {str(e)}")
 
@@ -741,32 +777,68 @@ class RadarPointCloudAnalyzer(Node):
         Collect and record data from points in all enabled sampling circles for each new frame.
         
         This method adds points within all enabled sampling circles to the experiment data
-        and updates the heatmap with these points.
+        and updates the heatmap with these points. Points are carefully categorized by distance
+        bands for more accurate analysis.
 
         Args:
             z_array: Z-coordinates of the current point cloud.
         """
         try:
+            # Ensure we have z_array data
+            if z_array is None or len(z_array) == 0:
+                self.get_logger().warn("No z-data available for collection")
+                return
+                
             timestamp = (
                 self.get_clock().now().to_msg().sec
                 + self.get_clock().now().to_msg().nanosec * 1e-9
             )
-            circle_data = ExperimentData()
-
-            # Process data for the primary circle (for backward compatibility)
-            indices = self.current_data['circle_indices']
-            self.get_logger().debug(f"Processing primary circle: {len(indices)} points")
             
-            if len(indices) > 0:
-                # Store point data
+            # Process data for the primary circle (for backward compatibility)
+            indices = self.current_data.get('circle_indices', np.array([], dtype=np.int32))
+            circle_point_count = len(indices) if indices is not None else 0
+            
+            # Get distance bands information if available
+            distance_bands = self.current_data.get('circle_distance_bands', {})
+            target_dist = self.params.target_distance
+            target_band_key = None
+            target_band_width = 1.0  # 1-meter bands
+            
+            # Find the distance band that contains the target distance
+            target_band_start = int(np.floor(target_dist))
+            target_band_key = f"{target_band_start}m-{target_band_start + target_band_width}m"
+            
+            # Log comprehensive information about distance bands and target distance
+            if distance_bands:
+                band_counts = [f"{k}: {v['count']} pts" for k, v in distance_bands.items()]
+                bands_str = ", ".join(band_counts)
+                self.get_logger().debug(
+                    f"Primary circle distance bands: {bands_str}, target distance: {target_dist}m, " +
+                    f"target band: {target_band_key}"
+                )
+            
+            # Detailed debug info for troubleshooting edge points
+            if hasattr(self, 'params') and hasattr(self.params, 'circles') and len(self.params.circles) > 0:
+                primary_circle = self.params.circles[0]
+                self.get_logger().debug(
+                    f"Processing primary circle at distance={primary_circle.distance:.2f}m, " +
+                    f"radius={primary_circle.radius:.2f}m, found {circle_point_count} points"
+                )
+            
+            if len(indices) > 0 and len(indices) <= len(z_array):
+                # Create a separate ExperimentData object for each distance band
+                circle_data = ExperimentData()
+                target_band_points = ExperimentData()
+                
+                # Store point data for all points in the circle
                 circle_data.x_points = self.current_data['circle_x'].tolist()
                 circle_data.y_points = self.current_data['circle_y'].tolist()
                 circle_data.z_points = z_array[indices].tolist()
                 circle_data.intensities = self.current_data['circle_intensities'].tolist()
                 circle_data.timestamps = [timestamp] * len(self.current_data['circle_x'])
                 circle_data.target_distances = [self.params.target_distance] * len(self.current_data['circle_x'])
-
-                # Calculate statistics
+                
+                # Calculate statistics for all points
                 count = len(self.current_data['circle_x'])
                 avg_intensity = (
                     float(np.mean(self.current_data['circle_intensities']))
@@ -778,9 +850,56 @@ class RadarPointCloudAnalyzer(Node):
                 circle_data.time_series_timestamps = [timestamp]
                 circle_data.circle_point_counts = [count]
                 circle_data.circle_avg_intensities = [avg_intensity]
-
+                
+                # If we have distance bands, extract points in the target band
+                target_band_count = 0
+                if target_band_key in distance_bands:
+                    band_data = distance_bands[target_band_key]
+                    band_indices = band_data['indices']
+                    target_band_count = band_data['count']
+                    
+                    # Store points from the target distance band separately
+                    if len(band_indices) > 0:
+                        target_band_points.x_points = self.current_data['circle_x'][band_indices].tolist()
+                        target_band_points.y_points = self.current_data['circle_y'][band_indices].tolist()
+                        target_band_points.intensities = self.current_data['circle_intensities'][band_indices].tolist()
+                        target_band_points.timestamps = [timestamp] * len(band_indices)
+                        target_band_points.target_distances = [self.params.target_distance] * len(band_indices)
+                        
+                        if len(indices[band_indices]) <= len(z_array):
+                            target_band_points.z_points = z_array[indices[band_indices]].tolist()
+                        
+                        # Store statistics for the target band
+                        target_band_points.time_series_timestamps = [timestamp]
+                        target_band_points.circle_point_counts = [target_band_count]
+                        if len(band_indices) > 0:
+                            avg_band_intensity = float(np.mean(self.current_data['circle_intensities'][band_indices]))
+                            target_band_points.circle_avg_intensities = [avg_band_intensity]
+                
+                # Store distance band information in metadata
+                circle_data.metadata['distance_bands'] = {k: v['count'] for k, v in distance_bands.items()}
+                circle_data.metadata['target_distance'] = self.params.target_distance
+                circle_data.metadata['target_band'] = target_band_key
+                circle_data.metadata['target_band_count'] = target_band_count
+                circle_data.metadata['total_count'] = count
+                
                 # Add to experiment data
                 self.experiment_data.extend(circle_data)
+                
+                # Log success with more detail to help debug edge cases
+                if count > 0:
+                    x_points = np.array(circle_data.x_points)
+                    y_points = np.array(circle_data.y_points)
+                    if len(x_points) > 0 and len(y_points) > 0:
+                        # Calculate radial distances from the origin (0,0)
+                        distances = np.sqrt(x_points**2 + y_points**2)
+                        min_dist = np.min(distances)
+                        max_dist = np.max(distances)
+                        self.get_logger().debug(
+                            f"Added {count} points to experiment data, " +
+                            f"distance range: {min_dist:.2f}m - {max_dist:.2f}m, " +
+                            f"target band ({target_band_key}): {target_band_count} points"
+                        )
 
                 # Update heatmap
                 update_heatmap_vectorized(
@@ -790,17 +909,25 @@ class RadarPointCloudAnalyzer(Node):
                     self.current_data['circle_intensities']
                 )
                 
-            # Process data for secondary circles if enabled
+            # Process data for secondary circles with similar approach
+            # (secondary circle processing can be extended with similar distance band handling)
             for i in range(1, len(self.params.circles)):
                 if not self.params.circles[i].enabled:
                     self.get_logger().debug(f"Secondary circle {i} is disabled, skipping")
                     continue
                     
                 circle_key = f'circle{i+1}'
-                secondary_indices = self.current_data[f'{circle_key}_indices']
+                secondary_indices = self.current_data.get(f'{circle_key}_indices', np.array([], dtype=np.int32))
                 self.get_logger().debug(f"Processing secondary circle {i}: {len(secondary_indices)} points")
                 
-                if len(secondary_indices) > 0:
+                # Get distance bands for this secondary circle
+                secondary_distance_bands = self.current_data.get(f'{circle_key}_distance_bands', {})
+                if secondary_distance_bands:
+                    band_counts = [f"{k}: {v['count']} pts" for k, v in secondary_distance_bands.items()]
+                    bands_str = ", ".join(band_counts)
+                    self.get_logger().debug(f"Secondary circle {i} distance bands: {bands_str}")
+                
+                if len(secondary_indices) > 0 and len(secondary_indices) <= len(z_array):
                     # Create secondary circle data
                     secondary_circle_data = ExperimentData()
                     
@@ -825,24 +952,14 @@ class RadarPointCloudAnalyzer(Node):
                     secondary_circle_data.circle_point_counts = [count]
                     secondary_circle_data.circle_avg_intensities = [avg_intensity]
                     
-                    # Store the circle index in the multi_frame_metrics
-                    secondary_circle_data.multi_frame_metrics[f'circle_index'] = i
+                    # Store distance band information in metadata
+                    secondary_circle_data.metadata['distance_bands'] = {k: v['count'] for k, v in secondary_distance_bands.items()}
                     
                     # Add to experiment data
                     self.experiment_data.extend(secondary_circle_data)
                     
-                    # Update heatmap for this circle too
-                    update_heatmap_vectorized(
-                        self,
-                        self.current_data[f'{circle_key}_x'],
-                        self.current_data[f'{circle_key}_y'],
-                        self.current_data[f'{circle_key}_intensities']
-                    )
-                    
-                    self.get_logger().debug(f"Added {count} points from circle {i} to experiment data")
-                    
         except Exception as e:
-            self.get_logger().error(f"Error processing collected data: {str(e)}")
+            self.get_logger().error(f"Error in process_collected_data: {str(e)}")
             
     def hard_reset_pcl(self) -> None:
         """

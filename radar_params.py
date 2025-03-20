@@ -141,6 +141,7 @@ class ExperimentData:
         circle_point_counts: List of point counts within sampling circle over time.
         circle_avg_intensities: List of average intensities within sampling circle over time.
         multi_frame_metrics: Dictionary containing metrics from multi-frame analysis.
+        metadata: Dictionary to store additional metadata like distance bands.
     """
 
     x_points: List[float] = field(default_factory=list)
@@ -153,6 +154,7 @@ class ExperimentData:
     circle_point_counts: List[int] = field(default_factory=list)
     circle_avg_intensities: List[float] = field(default_factory=list)
     multi_frame_metrics: Dict[str, Any] = field(default_factory=dict)
+    metadata: Dict[str, Any] = field(default_factory=dict)  # Store additional metadata like distance bands
 
     def clear(self) -> None:
         """
@@ -171,6 +173,7 @@ class ExperimentData:
         self.circle_point_counts.clear()
         self.circle_avg_intensities.clear()
         self.multi_frame_metrics.clear()
+        self.metadata.clear()
 
     def extend(self, other: "ExperimentData") -> None:
         """
@@ -196,3 +199,8 @@ class ExperimentData:
         for key, value in other.multi_frame_metrics.items():
             if key not in self.multi_frame_metrics:
                 self.multi_frame_metrics[key] = value
+
+        # Merge metadata (add any new keys from other)
+        for key, value in other.metadata.items():
+            if key not in self.metadata:
+                self.metadata[key] = value
