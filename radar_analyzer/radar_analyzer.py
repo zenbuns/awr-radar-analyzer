@@ -257,17 +257,18 @@ class RadarPointCloudAnalyzer(Node):
                 self.get_logger().debug("Empty point cloud received")
                 return
                 
-            # Extract data once to avoid duplication
-            raw_x = [p[0] for p in points_list]
-            raw_y = [p[1] for p in points_list]
-            raw_z = [p[2] for p in points_list]
-            intensities = [p[3] for p in points_list]
-
-            # Convert to numpy arrays for performance
-            x_array = np.array(raw_y, dtype=np.float32)
-            y_array = np.array(raw_x, dtype=np.float32)
-            z_array = np.array(raw_z, dtype=np.float32)
-            intensities_array = np.array(intensities, dtype=np.float32)
+            # Convert to arrays just once
+            x_array = np.array([p[1] for p in points_list], dtype=np.float32)
+            y_array = np.array([p[0] for p in points_list], dtype=np.float32)
+            z_array = np.array([p[2] for p in points_list], dtype=np.float32)
+            intensities_array = np.array([p[3] for p in points_list], dtype=np.float32)
+            
+            # Store current data
+            with self.data_lock:
+                self.current_data['x'] = x_array
+                self.current_data['y'] = y_array
+                self.current_data['z'] = z_array
+                self.current_data['intensities'] = intensities_array
             
         except Exception as e:
             self.get_logger().error(f"Error processing point cloud: {str(e)}")
@@ -318,54 +319,102 @@ class RadarPointCloudAnalyzer(Node):
             # Log details every 20 frames to avoid excessive logging
             if self.pcl_msg_count % 20 == 0:
                 self.get_logger().info(f"Received point cloud frame {self.pcl_msg_count} during bag playback")
-                self.get_logger().info(f"  - Point cloud contains {len(points_list)} points")
+                self.get_logger().info(f"  - Point cloud contains {len(x_array)} points")
         
+        # Skip processing if not needed for visualization or collection
         if not self.visible and not self.collecting_data:
-            return  # Skip processing if not needed for visualization or collection
-
-        current_time = time.time()
-        if (current_time - self.last_update_time < self.update_interval 
-                and not self.collecting_data):
-            return  # Rate limiting for visualization updates
-
-        self.last_update_time = current_time
-        
-        # Process point cloud data with proper locking
+            return
+            
+        # Split processing paths for different operations based on mode
         try:
-            with self.data_lock:
-                self.current_data['x'] = x_array
-                self.current_data['y'] = y_array
-                self.current_data['z'] = z_array
-                self.current_data['intensities'] = intensities_array
-
-                # Process multi-frame point clouds if enabled
-                if self.params.enable_multi_frame:
-                    process_multi_frame_data(
-                        self, x_array, y_array, z_array, intensities_array
-                    )
+            if self.collecting_data:
+                # Minimal processing for data collection (optimized path)
+                self._process_for_data_collection(x_array, y_array, z_array, intensities_array)
+            elif self.visible:
+                # Check rate limiting for visualization updates only
+                current_time = time.time()
+                if current_time - self.last_update_time < self.update_interval:
+                    return
+                self.last_update_time = current_time
                 
-                # Process circle points
-                filter_points_in_circle(
-                    self, x_array, y_array, intensities_array
-                )
-
-                # Decay before adding new data
-                apply_live_heatmap_decay(self)
-
-                # Update live heatmap
-                update_live_heatmap_vectorized(
-                    self, x_array, y_array, intensities_array
-                )
-
-                # If collecting data, store new info
-                if self.collecting_data and self.collection_start_time is not None:
-                    self.process_collected_data(z_array)
-                    elapsed_time = time.time() - self.collection_start_time
-                    if elapsed_time >= self.params.collection_duration:
-                        self.stop_data_collection()
-
+                # Full visualization processing
+                self._process_for_visualization(x_array, y_array, z_array, intensities_array)
         except Exception as e:
             self.get_logger().error(f"Error in point cloud processing: {str(e)}")
+            
+    def _process_for_data_collection(self, x_array, y_array, z_array, intensities_array):
+        """
+        Optimized processing path for data collection during bag playback.
+        
+        This method only performs the minimum processing needed for data collection,
+        skipping visualization-related operations to maximize performance.
+        
+        Args:
+            x_array: X-coordinates of points
+            y_array: Y-coordinates of points
+            z_array: Z-coordinates of points
+            intensities_array: Intensity values of points
+        """
+        with self.data_lock:
+            # Process multi-frame point clouds if enabled
+            # (optimized version will be handled in the multi_frame module)
+            if self.params.enable_multi_frame:
+                process_multi_frame_data(
+                    self, x_array, y_array, z_array, intensities_array
+                )
+            
+            # Process primary circle points only (optimized version in filter_points_in_circle)
+            filter_points_in_circle(
+                self, x_array, y_array, intensities_array
+            )
+            
+            # CRITICAL FIX: Update heatmap even during data collection
+            # Without this, the heatmap stays empty during collection
+            apply_live_heatmap_decay(self)
+            update_live_heatmap_vectorized(
+                self, x_array, y_array, intensities_array
+            )
+            
+            # Store data for collection
+            if self.collection_start_time is not None:
+                self.process_collected_data(z_array)
+                elapsed_time = time.time() - self.collection_start_time
+                if elapsed_time >= self.params.collection_duration:
+                    self.stop_data_collection()
+                    
+    def _process_for_visualization(self, x_array, y_array, z_array, intensities_array):
+        """
+        Full processing path for visualization updates.
+        
+        This method performs all necessary operations for complete visualization
+        of radar data including multi-frame processing, circle filtering, and
+        heatmap generation.
+        
+        Args:
+            x_array: X-coordinates of points
+            y_array: Y-coordinates of points
+            z_array: Z-coordinates of points
+            intensities_array: Intensity values of points
+        """
+        with self.data_lock:
+            # Process multi-frame point clouds if enabled
+            if self.params.enable_multi_frame:
+                process_multi_frame_data(
+                    self, x_array, y_array, z_array, intensities_array
+                )
+            
+            # Process all circle points for visualization
+            filter_points_in_circle(
+                self, x_array, y_array, intensities_array
+            )
+
+            # Decay before adding new data
+            apply_live_heatmap_decay(self)
+
+            # Update live heatmap
+            update_live_heatmap_vectorized(
+                self, x_array, y_array, intensities_array
+            )
 
     def track_array_callback(self, msg: MarkerArray) -> None:
         """

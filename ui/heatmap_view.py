@@ -50,7 +50,7 @@ class HeatmapView(QWidget):
         super().__init__(parent)
         
         # Default parameters
-        self.max_range = 35.0
+        self.max_range = 35.0  # Ensure max range is exactly 35.0 meters
         self.circle_interval = 10.0
         self.circle_distance = 5.0
         self.circle_radius = 0.5
@@ -98,7 +98,7 @@ class HeatmapView(QWidget):
         """Set up the heatmap plot with initial components."""
         # Create initial heatmap data if not existing
         if self.heatmap_data is None:
-            grid_size = int(2 * self.max_range / 0.5)
+            grid_size = int(2 * self.max_range / 1.0)  # Lower resolution: 1.0m instead of 0.5m
             # Ensure grid size is even for better memory alignment
             if grid_size % 2 == 1:
                 grid_size += 1
@@ -107,55 +107,69 @@ class HeatmapView(QWidget):
         # Create axis
         self.ax = self.figure.add_subplot(111)
         
-        # Set background colors
-        self.ax.set_facecolor(Colors.DARK_BACKGROUND)
-        self.figure.patch.set_facecolor(Colors.DARK_BACKGROUND)
+        # Set scientific background color - deeper blue for more contrast
+        self.ax.set_facecolor('#050510')  # Deeper navy blue scientific background
+        self.figure.patch.set_facecolor('#050510')
         
-        # Set aspect ratio to auto to avoid aspect ratio errors
-        self.ax.set_aspect('auto')
+        # Use equal aspect ratio to keep circles circular
+        self.ax.set_aspect('equal')
         
-        # Create heatmap with improved colormap
-        cmap = plt.cm.get_cmap(self.current_colormap).copy()
+        # Create heatmap with improved scientific colormap
+        cmap = plt.cm.get_cmap('viridis').copy()
         
-        # Adjust normalization for better visibility
-        norm = colors.PowerNorm(gamma=0.7, vmin=self.noise_floor, vmax=1.0)
+        # Adjust normalization for better visibility and contrast
+        norm = colors.PowerNorm(gamma=0.5, vmin=self.noise_floor, vmax=1.0)
         
+        # Ensure correct extent values using max_range of 35.0 meters
         self.components['heatmap'] = self.ax.imshow(
             self.heatmap_data,
-            extent=[-self.max_range, self.max_range, 0, 2 * self.max_range],
+            extent=[-self.max_range, self.max_range, 0, self.max_range],
             origin='lower',
             cmap=cmap,
             norm=norm,
             aspect='auto',
             interpolation='bilinear',
-            alpha=0.9  # Slightly increased for better visibility
+            alpha=0.95
         )
         
         self.components['norm'] = norm
         self.components['contour'] = None
-        self.components['contour_levels'] = 6
+        self.components['contour_levels'] = 12  # Increased precision levels
         
-        # Add colorbar with modern styling
+        # Add colorbar with enhanced scientific styling
         colorbar = self.figure.colorbar(
             self.components['heatmap'],
             ax=self.ax,
-            label='Intensity',
-            fraction=0.03,  # Narrower
+            label='Signal Intensity (dB)',
+            fraction=0.03,
             pad=0.02
         )
-        colorbar.ax.tick_params(labelsize=9, colors=Colors.TEXT_MUTED)
-        colorbar.set_label('Intensity', size=11, color=Colors.TEXT)
+        colorbar.ax.tick_params(labelsize=8, colors='#AACCEE')
+        colorbar.set_label('Signal Intensity (dB)', size=9, color='#BBDDFF')
         self.components['colorbar'] = colorbar
         
-        # Define range arcs
-        major_ranges = list(range(0, int(2 * self.max_range) + 1, int(self.circle_interval) * 2))
+        # Define range arcs with scientific precision
+        circle_interval_m = 5  # 5-meter intervals for precision
+        major_ranges = list(range(0, int(self.max_range) + 1, circle_interval_m * 2))
         minor_ranges = [
-            r for r in range(0, int(2 * self.max_range) + 1, int(self.circle_interval))
+            r for r in range(0, int(self.max_range) + 1, circle_interval_m)
             if r not in major_ranges
         ]
         
-        # Add major range arcs with improved visibility
+        # Add polar grid with light lines for scientific precision
+        theta = np.linspace(0, np.pi, 100)
+        for r in range(0, int(self.max_range) + 1, 10):
+            if r == 0:
+                continue
+            x = r * np.sin(theta)
+            y = r * np.cos(theta)
+            self.ax.plot(x, y, color='#334455', linestyle='-', linewidth=0.3, alpha=0.3)
+        
+        # Add major range arcs with scientific styling
         for r in major_ranges:
+            if r == 0:  # Skip the zero radius
+                continue
+                
             arc = Arc(
                 (0, 0),
                 width=2 * r,
@@ -164,22 +178,25 @@ class HeatmapView(QWidget):
                 theta1=0,
                 theta2=180,
                 fill=False,
-                color=Colors.TEXT,
+                color='#AABBDD',  # Even lighter scientific blue-gray
                 linestyle='-',
-                linewidth=1.0,
-                alpha=0.7
+                linewidth=0.6,
+                alpha=0.6
             )
             self.ax.add_patch(arc)
             if 0 < r <= self.max_range:
                 self.ax.text(
-                    0, r, f"{int(r)}m", ha='right', va='bottom',
-                    color=Colors.TEXT, fontsize=9, fontweight='bold',
-                    bbox=dict(facecolor=Colors.LIGHT_BACKGROUND, edgecolor='none', 
-                             alpha=0.7, pad=1, boxstyle='round,pad=0.2')
+                    r * 0.05, r, f"{int(r)}m", ha='left', va='bottom',
+                    color='#AABBDD', fontsize=7, fontweight='normal',
+                    bbox=dict(facecolor='#050510', edgecolor='none', 
+                             alpha=0.7, pad=1, boxstyle='round,pad=0.1')
                 )
         
-        # Add minor range arcs
+        # Add minor range arcs with subtle scientific styling
         for r in minor_ranges:
+            if r == 0:  # Skip the zero radius
+                continue
+                
             arc = Arc(
                 (0, 0),
                 width=2 * r,
@@ -188,14 +205,93 @@ class HeatmapView(QWidget):
                 theta1=0,
                 theta2=180,
                 fill=False,
-                color=Colors.TEXT,
+                color='#7799CC',  # Lighter scientific blue
                 linestyle=':',
-                linewidth=0.5,
+                linewidth=0.3,
                 alpha=0.4
             )
             self.ax.add_patch(arc)
         
-        # Add target arc with higher visibility
+        # Add angle markers every 15 degrees for more precision (but skip previously excluded angles)
+        for angle in range(-90, 91, 15):
+            if angle == 0 or angle == -90 or angle == 90 or angle % 30 != 0:
+                # Skip 0, -90, 90 degrees and keep only 15° intervals not covered by 30° intervals
+                continue
+                
+            # Convert degrees to radians for calculations
+            angle_rad = np.radians(angle)
+            
+            # Calculate end points using parametric form
+            x_end = self.max_range * np.sin(angle_rad)
+            y_end = self.max_range * np.cos(angle_rad)
+            
+            # Draw angle line - thinner for 15° intervals
+            self.ax.plot(
+                [0, x_end], 
+                [0, y_end], 
+                linestyle=':',  # Dotted line for minor angles
+                color='#5566AA', 
+                linewidth=0.3, 
+                alpha=0.4
+            )
+        
+        # Add angle markers every 30 degrees with proper scientific labels (keep existing)
+        for angle in range(-90, 91, 30):
+            if angle == 0 or angle == -90 or angle == 90:
+                # Skip 0 degrees, handled with sensor indicator
+                # Skip -90 and 90 degrees per user request
+                continue
+                
+            # Convert degrees to radians for calculations
+            angle_rad = np.radians(angle)
+            
+            # Calculate end points using parametric form
+            x_end = self.max_range * np.sin(angle_rad)
+            y_end = self.max_range * np.cos(angle_rad)
+            
+            # Draw angle line
+            self.ax.plot(
+                [0, x_end], 
+                [0, y_end], 
+                linestyle='--', 
+                color='#7788BB', 
+                linewidth=0.5, 
+                alpha=0.6
+            )
+            
+            # Label at 80% of max range to avoid crowding
+            label_distance = 0.8 * self.max_range
+            x_label = label_distance * np.sin(angle_rad)
+            y_label = label_distance * np.cos(angle_rad)
+            
+            # Add angle label
+            self.ax.text(
+                x_label, y_label, f"{angle}°", 
+                color='#99BBDD',
+                fontsize=7,
+                ha='center', 
+                va='center',
+                bbox=dict(facecolor='#050510', edgecolor='none', alpha=0.7, boxstyle='round,pad=0.1')
+            )
+        
+        # Add enhanced radar crosshairs with tick marks
+        # Vertical line
+        self.ax.plot([0, 0], [0, self.max_range], color='#00DD88', alpha=0.4, linewidth=0.5)
+        
+        # Horizontal line segments with ticks every 5m
+        for x in range(-int(self.max_range), int(self.max_range)+1, 5):
+            if x == 0:
+                continue
+            tick_length = 0.5 if x % 10 == 0 else 0.25
+            self.ax.plot([x, x], [0, tick_length], color='#00DD88', alpha=0.3, linewidth=0.4)
+                
+        # Add professional sensor location indicator at origin
+        sensor_circle = Circle((0, 0), 0.5, fill=True, color='#00DDCC', alpha=0.7)
+        self.ax.add_patch(sensor_circle)
+        sensor_ring = Circle((0, 0), 0.7, fill=False, color='#00FFEE', linewidth=0.5, alpha=0.5)
+        self.ax.add_patch(sensor_ring)
+        
+        # Add target arc with scientific styling
         self.components['target_arc'] = Arc(
             (0, 0),
             width=2 * self.target_distance,
@@ -204,24 +300,24 @@ class HeatmapView(QWidget):
             theta1=0,
             theta2=180,
             fill=False,
-            color=Colors.ACCENT_RED,
+            color='#FF5566',  # Scientific red
             linestyle='-',
-            linewidth=1.5,
-            alpha=0.9
+            linewidth=1.0,
+            alpha=0.7
         )
         self.ax.add_patch(self.components['target_arc'])
         
-        # Create sampling circles with different positions and modern colors
+        # Create sampling circles with different positions and scientific colors
         self.components['sampling_circles'] = []
         
-        # Circle colors and positions
+        # Circle colors and positions - enhanced scientific color scheme
         circle_configs = [
             {'enabled': True, 'distance': 5.0, 'radius': 0.5, 'angle': 0, 
-             'color': Colors.ACCENT_BLUE, 'label': 'Primary'},
+             'color': '#44DDFF', 'label': 'Primary'},
             {'enabled': False, 'distance': 15.0, 'radius': 0.5, 'angle': -60, 
-             'color': Colors.ACCENT_LAVENDER, 'label': 'Left'},
+             'color': '#77BBFF', 'label': 'Left'},
             {'enabled': False, 'distance': 25.0, 'radius': 0.5, 'angle': 60, 
-             'color': Colors.ACCENT_YELLOW, 'label': 'Right'}
+             'color': '#FFDD66', 'label': 'Right'}
         ]
         
         for i, config in enumerate(circle_configs):
@@ -230,18 +326,33 @@ class HeatmapView(QWidget):
             x_pos = config['distance'] * np.sin(angle_rad)
             y_pos = config['distance'] * np.cos(angle_rad)
             
-            # Create sampling circle with modern styling
+            # Create sampling circle with scientific styling
             sampling_circle = Circle(
                 (x_pos, y_pos),
                 config['radius'],
                 fill=False,
                 color=config['color'],
                 linestyle='-',
-                linewidth=1.8,  # Thicker for better visibility
+                linewidth=0.8,
                 alpha=0.8 if config['enabled'] else 0.2,
                 visible=config['enabled']
             )
             self.ax.add_patch(sampling_circle)
+            
+            # Add small targeting crosshairs at center of sampling circle
+            if config['enabled']:
+                crosshair_size = 0.3
+                self.ax.plot(
+                    [x_pos-crosshair_size, x_pos+crosshair_size], 
+                    [y_pos, y_pos], 
+                    color=config['color'], linewidth=0.4, alpha=0.6
+                )
+                self.ax.plot(
+                    [x_pos, x_pos], 
+                    [y_pos-crosshair_size, y_pos+crosshair_size], 
+                    color=config['color'], linewidth=0.4, alpha=0.6
+                )
+            
             self.components[f'sampling_circle_{i}'] = sampling_circle
             self.components['sampling_circles'].append({
                 'circle': sampling_circle,
@@ -253,37 +364,61 @@ class HeatmapView(QWidget):
         # Add roi indicators list for regions of interest
         self.components['roi_indicators'] = []
         
-        # Add grid for better readability
-        self.ax.grid(True, color=Colors.BORDER, linestyle=':', linewidth=0.3, alpha=0.2)
+        # Add grid for scientific precision - very subtle
+        self.ax.grid(True, color='#223344', linestyle=':', linewidth=0.2, alpha=0.3)
         
-        # Set plot limits
+        # Set plot limits - ensure max_range is respected
         self.ax.set_xlim(-self.max_range, self.max_range)
-        self.ax.set_ylim(0, 2 * self.max_range)
+        self.ax.set_ylim(0, self.max_range)
         
-        # Add labels with modern styling
-        self.ax.set_xlabel('Cross-Range (m)', fontsize=11, labelpad=8, color=Colors.TEXT)
-        self.ax.set_ylabel('Range (m)', fontsize=11, labelpad=8, color=Colors.TEXT)
-        self.ax.set_title('Radar Intensity Map', fontsize=14, color=Colors.TEXT, weight='bold')
+        # Add labels with scientific radar terminology
+        self.ax.set_xlabel('Azimuth (m)', fontsize=9, labelpad=8, color='#BBDDFF')
+        self.ax.set_ylabel('Range (m)', fontsize=9, labelpad=8, color='#BBDDFF')
+        self.ax.set_title('Radar Intensity Map', fontsize=11, color='#DDEEFF', weight='normal')
         
-        # Configure ticks with modern styling
-        self.ax.tick_params(axis='x', colors=Colors.TEXT_MUTED, labelsize=9)
-        self.ax.tick_params(axis='y', colors=Colors.TEXT_MUTED, labelsize=9)
+        # Configure ticks with scientific styling
+        self.ax.tick_params(axis='x', colors='#AABBDD', labelsize=8)
+        self.ax.tick_params(axis='y', colors='#AABBDD', labelsize=8)
         
-        # Set spine colors
+        # Set spine colors for scientific border
         for spine in self.ax.spines.values():
-            spine.set_edgecolor(Colors.BORDER)
+            spine.set_edgecolor('#223344')
+            spine.set_linewidth(0.5)
         
-        # Add SNR text with improved styling
+        # Add technical statistics box with enhanced resolution information
+        res_text = (
+            f"Resolution: {1.0:.1f}m/px\n"
+            f"Range: 0-{self.max_range:.0f}m\n"
+            f"μ-threshold: {self.noise_floor:.3f}\n"
+            f"Grid: {grid_size}×{grid_size} px"
+        )
+        
+        self.components['res_text'] = self.ax.text(
+            0.98, 0.98, res_text,
+            transform=self.ax.transAxes,
+            color='#AABBDD',
+            fontsize=7,
+            ha='right',
+            va='top',
+            bbox=dict(
+                boxstyle='round,pad=0.2',
+                facecolor='#101025',
+                alpha=0.8,
+                edgecolor='#334466'
+            )
+        )
+        
+        # Add SNR text with scientific notation and units
         self.components['snr_text'] = self.ax.text(
             0.02, 0.02, 'SNR: N/A',
             transform=self.ax.transAxes,
-            color=Colors.ACCENT_YELLOW,
-            fontsize=10,
+            color='#EEDD66',
+            fontsize=8,
             bbox=dict(
-                boxstyle='round,pad=0.3',
-                facecolor=Colors.LIGHT_BACKGROUND,
+                boxstyle='round,pad=0.2',
+                facecolor='#101025',
                 alpha=0.8,
-                edgecolor=Colors.BORDER
+                edgecolor='#334466'
             )
         )
         
@@ -306,35 +441,63 @@ class HeatmapView(QWidget):
         # Store the newest data regardless of whether we update the display
         self.heatmap_data = heatmap_data
         
+        # CRITICAL FIX: Always force updates during the first 25 frames
+        # This ensures data appears immediately and prevents empty display
+        force_update = self.optimizer.frame_counter <= 25
+        
         # Use optimizer to determine if we should update the visualization
-        if not self.optimizer.should_update_heatmap(heatmap_data):
+        if not force_update and not self.optimizer.should_update_heatmap(heatmap_data):
             return
         
-        # Apply noise floor threshold
-        data_thresholded = heatmap_data.copy()
-        data_thresholded[data_thresholded < self.noise_floor] = 0
-        
-        # Make sure the heatmap component exists
-        if 'heatmap' not in self.components or self.components['heatmap'] is None:
-            # If missing, recreate the plot
-            self.setup_plot()
+        try:
+            # Apply noise floor threshold - FIXING POTENTIAL LOGIC ERROR
+            # Create a copy to avoid modifying the original
+            data_thresholded = heatmap_data.copy()
             
-        # Update display based on visualization mode - pass optimizer state for contour decisions
-        self._update_visualization_mode(data_thresholded, redraw=self.optimizer.should_redraw())
-        
-        # Update SNR with formatting improvements
-        if np.max(data_thresholded) > 0:
-            snr = 10.0 * np.log10(np.max(data_thresholded) / self.noise_floor)
-            if 'snr_text' in self.components:
-                self.components['snr_text'].set_text(f'SNR: {snr:.1f} dB')
-        else:
-            if 'snr_text' in self.components:
-                self.components['snr_text'].set_text('SNR: N/A')
-        
-        # Only redraw if necessary according to the optimizer
-        if self.optimizer.should_redraw():
-            # Use draw_idle which is more efficient than full draw
-            self.canvas.draw_idle()
+            # CRITICAL FIX: Only apply threshold if noise floor is > 0
+            # This prevents empty heatmap when noise floor is too high
+            if self.noise_floor > 0:
+                data_thresholded[data_thresholded < self.noise_floor] = 0
+            
+            # DEBUGGING: Check if we have any non-zero values
+            nonzero_count = np.count_nonzero(data_thresholded)
+            if nonzero_count == 0 and np.max(heatmap_data) > 0:
+                # If we've zeroed out all data due to threshold, use a fraction of max instead
+                self.noise_floor = max(0.01, np.max(heatmap_data) * 0.25)
+                data_thresholded = heatmap_data.copy()
+                data_thresholded[data_thresholded < self.noise_floor] = 0
+            
+            # Make sure the heatmap component exists
+            if 'heatmap' not in self.components or self.components['heatmap'] is None:
+                # If missing, recreate the plot
+                self.setup_plot()
+                
+            # Update display based on visualization mode - pass optimizer state for contour decisions
+            self._update_visualization_mode(data_thresholded, redraw=force_update or self.optimizer.should_redraw())
+            
+            # Update SNR with enhanced scientific formatting
+            if np.max(data_thresholded) > 0:
+                snr_value = np.max(data_thresholded) / max(0.001, self.noise_floor)  # Avoid division by zero
+                snr_db = 10.0 * np.log10(snr_value)
+                if 'snr_text' in self.components:
+                    self.components['snr_text'].set_text(f'SNR: {snr_db:.1f} dB (ratio: {snr_value:.1f})')
+            else:
+                if 'snr_text' in self.components:
+                    self.components['snr_text'].set_text('SNR: N/A')
+            
+            # Only redraw if necessary according to the optimizer
+            if force_update or self.optimizer.should_redraw():
+                # Ensure aspect ratio is maintained
+                self.ax.set_aspect('equal')
+                # Use draw_idle which is more efficient than full draw
+                self.canvas.draw_idle()
+                
+        except Exception as e:
+            print(f"Error updating heatmap: {str(e)}")
+            # Try to continue with basic update in case of error
+            if 'heatmap' in self.components and self.heatmap_data is not None:
+                self.components['heatmap'].set_data(self.heatmap_data)
+                self.canvas.draw_idle()
     
     def _update_visualization_mode(self, data, redraw=True):
         """
@@ -384,7 +547,7 @@ class HeatmapView(QWidget):
             
             # Ensure heatmap is visible based on visualization mode
             self.components['heatmap'].set_visible(self.visualization_mode in ['heatmap', 'combined'])
-            alpha = 0.85 if self.visualization_mode == 'heatmap' else 0.5
+            alpha = 0.95 if self.visualization_mode == 'heatmap' else 0.6
             self.components['heatmap'].set_alpha(alpha)
             
             # Clear existing contours if needed
@@ -413,22 +576,22 @@ class HeatmapView(QWidget):
                         
                         # Use evenly distributed levels for better visualization
                         if np.max(contour_data) > self.noise_floor:
-                            # Generate fewer contour levels for better performance
-                            num_levels = 5 if self.visualization_mode == 'combined' else 6
+                            # Generate more contour levels for scientific precision
+                            num_levels = 12
                             levels = np.linspace(self.noise_floor, np.max(contour_data), num_levels)
                             
                             # Create contours only if we have valid levels
                             if levels.size > 1 and levels[-1] > levels[0]:
                                 # Set contour colors and properties based on mode
-                                contour_color = 'white' if self.visualization_mode == 'combined' else 'black'
-                                line_width = 0.5 if self.visualization_mode == 'combined' else 0.75
+                                contour_color = '#BBCCEE' if self.visualization_mode == 'combined' else '#DDEEFF'
+                                line_width = 0.4 if self.visualization_mode == 'combined' else 0.6
                                 
                                 self.components['contour'] = self.ax.contour(
                                     contour_data,
                                     levels=levels,
-                                    extent=[-self.max_range, self.max_range, -self.max_range, self.max_range],
+                                    extent=[-self.max_range, self.max_range, 0, self.max_range],
                                     colors=contour_color,
-                                    alpha=0.5,
+                                    alpha=0.7,
                                     linewidths=line_width
                                 )
                     except Exception as e:
@@ -625,10 +788,10 @@ class HeatmapView(QWidget):
                 theta1=0,
                 theta2=180,
                 fill=False,
-                color=Colors.ACCENT_RED,
+                color='#FF5566',  # Scientific red
                 linestyle='-',
-                linewidth=1.5,
-                alpha=0.9
+                linewidth=1.0,  # Slightly thinner but still visible
+                alpha=0.7      # More transparent
             )
             self.ax.add_patch(self.components['target_arc'])
             self.canvas.draw_idle()
@@ -662,7 +825,8 @@ class HeatmapView(QWidget):
             fill=False, 
             color=Colors.ACCENT_GREEN,
             linestyle='--', 
-            linewidth=1.8
+            linewidth=1.0,  # Thinner for subtlety
+            alpha=0.7      # More transparent
         )
         self.ax.add_patch(roi)
         self.roi_list.append(roi)
@@ -699,7 +863,7 @@ class HeatmapView(QWidget):
             
             # Get grid parameters
             max_range = self.max_range
-            res = 0.5  # Assume 0.5m resolution for simplicity
+            res = 1.0  # Updated to 1.0m resolution to match grid size
             grid_size_x, grid_size_y = self.heatmap_data.shape
             
             # Create coordinate arrays for all grid points
@@ -709,48 +873,163 @@ class HeatmapView(QWidget):
             
             # Calculate distances from each grid point to ROI center
             distances = np.sqrt((x_coords - center_x)**2 + (y_coords - center_y)**2)
-            roi_mask = distances <= radius
-            roi_data = self.heatmap_data[roi_mask]
             
-            if roi_data.size > 0:
-                # Calculate statistics
-                stats = {
-                    'mean_intensity': float(np.mean(roi_data)),
-                    'max_intensity': float(np.max(roi_data)),
-                    'std_intensity': float(np.std(roi_data)),
-                    'signal_coverage': float(np.sum(roi_data > self.noise_floor)) / roi_data.size,
-                    'center': (center_x, center_y),
-                    'radius': radius
+            # Calculate distances from each grid point to origin (0,0) for distance bands
+            distance_from_origin = np.sqrt(x_coords**2 + y_coords**2)
+            
+            # Create masks for inside and outside ROI
+            inside_roi_mask = distances <= radius
+            outside_roi_mask = ~inside_roi_mask  # Use inverse for better efficiency
+            
+            # Get data for inside and outside ROI
+            inside_roi_data = self.heatmap_data[inside_roi_mask]
+            outside_roi_data = self.heatmap_data[outside_roi_mask]
+            
+            # Calculate distance from origin correctly for each point
+            inside_roi_distances = distance_from_origin[inside_roi_mask]
+            outside_roi_distances = distance_from_origin[outside_roi_mask]
+            
+            # Get intensity values corresponding to each distance
+            inside_roi_intensity = self.heatmap_data[inside_roi_mask]
+            outside_roi_intensity = self.heatmap_data[outside_roi_mask]
+            
+            # Initialize stats dictionary
+            stats = {}
+            
+            if inside_roi_data.size > 0:
+                # Calculate statistics for inside ROI
+                inside_stats = {
+                    'mean_intensity': float(np.mean(inside_roi_data)),
+                    'max_intensity': float(np.max(inside_roi_data)),
+                    'std_intensity': float(np.std(inside_roi_data)),
+                    'signal_coverage': float(np.sum(inside_roi_data > self.noise_floor)) / inside_roi_data.size,
+                    'points_count': inside_roi_data.size,
+                    'distances': inside_roi_distances,  # Store distances for band analysis
+                    'intensity_by_distance': inside_roi_intensity  # Store intensity by distance
                 }
+                stats['inside_roi'] = inside_stats
                 
-                # Create statistics text with improved styling
-                stats_text = (
-                    f"ROI Analysis\n"
-                    f"μ={stats['mean_intensity']:.2f}  Max={stats['max_intensity']:.2f}\n"
-                    f"Coverage: {stats['signal_coverage'] * 100:.1f}%"
-                )
-                
-                # Display statistics on the heatmap with improved styling
-                text = self.ax.text(
-                    center_x,
-                    center_y + radius + 0.5,  # Adjust position for better visibility
-                    stats_text,
-                    color=Colors.TEXT,
-                    fontsize=9,
-                    bbox=dict(
-                        boxstyle='round,pad=0.4',
-                        facecolor=Colors.LIGHT_BACKGROUND,
-                        alpha=0.85,
-                        edgecolor=Colors.ACCENT_GREEN
-                    ),
-                    ha='center',
-                    weight='bold'
-                )
-                self.canvas.draw_idle()
-                
-                return stats
+            if outside_roi_data.size > 0:
+                # Calculate statistics for outside ROI
+                outside_stats = {
+                    'mean_intensity': float(np.mean(outside_roi_data)),
+                    'max_intensity': float(np.max(outside_roi_data)),
+                    'std_intensity': float(np.std(outside_roi_data)),
+                    'signal_coverage': float(np.sum(outside_roi_data > self.noise_floor)) / outside_roi_data.size,
+                    'points_count': outside_roi_data.size,
+                    'distances': outside_roi_distances,  # Store distances for band analysis
+                    'intensity_by_distance': outside_roi_intensity  # Store intensity by distance
+                }
+                stats['outside_roi'] = outside_stats
             
-            return None
+            # Calculate total points correctly
+            inside_count = stats['inside_roi']['points_count'] if 'inside_roi' in stats else 0
+            outside_count = stats['outside_roi']['points_count'] if 'outside_roi' in stats else 0
+            total_points = inside_count + outside_count
+            
+            # Perform distance band analysis with more precise calculations
+            distance_bands = [(0, 10), (10, 20), (20, 30), (30, 40)]
+            band_analysis = []
+            
+            for min_dist, max_dist in distance_bands:
+                # Process inside ROI points in this band
+                inside_band_count = 0
+                if 'inside_roi' in stats:
+                    inside_band_mask = (stats['inside_roi']['distances'] >= min_dist) & (stats['inside_roi']['distances'] < max_dist)
+                    inside_band_count = int(np.sum(inside_band_mask))
+                
+                # Process outside ROI points in this band
+                outside_band_count = 0
+                if 'outside_roi' in stats:
+                    outside_band_mask = (stats['outside_roi']['distances'] >= min_dist) & (stats['outside_roi']['distances'] < max_dist)
+                    outside_band_count = int(np.sum(outside_band_mask))
+                
+                # Total points in this band (sum, not double counting)
+                band_total = inside_band_count + outside_band_count
+                
+                # Calculate average intensity in this band if needed
+                avg_intensity = 0.0
+                if 'inside_roi' in stats and inside_band_count > 0:
+                    inside_intensities = stats['inside_roi']['intensity_by_distance'][inside_band_mask]
+                    inside_intensity_sum = np.sum(inside_intensities)
+                else:
+                    inside_intensity_sum = 0.0
+                
+                if 'outside_roi' in stats and outside_band_count > 0:
+                    outside_intensities = stats['outside_roi']['intensity_by_distance'][outside_band_mask]
+                    outside_intensity_sum = np.sum(outside_intensities)
+                else:
+                    outside_intensity_sum = 0.0
+                
+                total_band_count = inside_band_count + outside_band_count
+                if total_band_count > 0:
+                    avg_intensity = (inside_intensity_sum + outside_intensity_sum) / total_band_count
+                
+                band_analysis.append({
+                    'range': f"{min_dist}-{max_dist}m",
+                    'count': band_total,
+                    'inside_count': inside_band_count,
+                    'outside_count': outside_band_count,
+                    'avg_intensity': float(avg_intensity)
+                })
+            
+            # Add band analysis to stats
+            stats['distance_bands'] = band_analysis
+            
+            # Add combined statistics
+            stats.update({
+                'center': (center_x, center_y),
+                'radius': radius,
+                'total_points': total_points,
+                'inside_outside_ratio': inside_roi_data.size / outside_roi_data.size if outside_roi_data.size > 0 else float('inf'),
+                'intensity_ratio': (float(np.mean(inside_roi_data)) / float(np.mean(outside_roi_data))) 
+                                   if outside_roi_data.size > 0 and np.mean(outside_roi_data) > 0 else float('inf')
+            })
+            
+            # Create statistics text with scientific notation and improved styling
+            inside_mean = stats['inside_roi']['mean_intensity'] if 'inside_roi' in stats else 0
+            inside_max = stats['inside_roi']['max_intensity'] if 'inside_roi' in stats else 0
+            inside_std = stats['inside_roi']['std_intensity'] if 'inside_roi' in stats else 0
+            outside_mean = stats['outside_roi']['mean_intensity'] if 'outside_roi' in stats else 0
+            
+            inside_count = stats['inside_roi']['points_count'] if 'inside_roi' in stats else 0
+            outside_count = stats['outside_roi']['points_count'] if 'outside_roi' in stats else 0
+            
+            intensity_ratio = inside_mean / outside_mean if outside_mean > 0 else float('inf')
+            
+            stats_text = (
+                f"ROI Analysis (r={radius:.1f}m)\n"
+                f"Inside: n={inside_count}, μ={inside_mean:.2f}, σ={inside_std:.2f}\n"
+                f"Outside: n={outside_count}, μ={outside_mean:.2f}\n"
+                f"Total: {total_points} pts, I.R.={intensity_ratio:.1f}x"
+            )
+            
+            # Add distance band summary to stats with accurate counts
+            band_summary = "\nDistance Bands:\n"
+            for band in band_analysis:
+                band_summary += f"{band['range']}: {band['count']} pts\n"
+            
+            stats_text += band_summary
+            
+            # Display statistics on the heatmap with scientific styling
+            text = self.ax.text(
+                center_x,
+                center_y + radius + 0.5,  # Adjust position for better visibility
+                stats_text,
+                color='#CCDDEE',
+                fontsize=8,
+                bbox=dict(
+                    boxstyle='round,pad=0.3',
+                    facecolor='#101025',
+                    alpha=0.85,
+                    edgecolor='#44AA88'
+                ),
+                ha='center',
+                weight='normal'
+            )
+            self.canvas.draw_idle()
+            
+            return stats
         
         except Exception as e:
             print(f"Error analyzing ROI: {str(e)}")
@@ -758,7 +1037,7 @@ class HeatmapView(QWidget):
     
     def reset_heatmap(self):
         """Reset the heatmap to initial state."""
-        grid_size = int(2 * self.max_range / 0.5)
+        grid_size = int(2 * self.max_range / 1.0)  # Lower resolution: 1.0m instead of 0.5m
         # Ensure grid size is even for better memory alignment
         if grid_size % 2 == 1:
             grid_size += 1

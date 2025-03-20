@@ -37,10 +37,6 @@ class HeatmapOptimizer:
         self.max_fps = 30  # maximum frames per second
         self.startup_phase = True  # Special flag for startup phase
         self.startup_frames = 10   # Number of frames to always render during startup
-        # Add cached data for optimization
-        self.data_checksum_cache = {}
-        self.last_data_shape = None
-        self.change_threshold = 0.05  # 5% change threshold
         
     def should_update_heatmap(self, data):
         """
@@ -55,68 +51,40 @@ class HeatmapOptimizer:
         current_time = time.time()
         self.frame_counter += 1
         
-        # Always update the first 10 frames to ensure data appears
-        if self.frame_counter <= 10:
+        # CRITICAL FIX: Continue regular updates after startup phase
+        # Ensure minimum update frequency regardless of data changes
+        if current_time - self.last_update_time >= self.update_interval:
             self.last_update_time = current_time
             return True
         
-        # During startup phase, always update for the first few frames
-        if self.startup_phase and self.frame_counter <= self.startup_frames:
-            # After startup_frames frames, exit startup phase
-            if self.frame_counter == self.startup_frames:
+        # Always update during startup phase for consistent initial rendering
+        if self.frame_counter <= 100 or self.startup_phase:
+            if self.frame_counter == 100:
                 self.startup_phase = False
             self.last_update_time = current_time
             return True
         
-        # Frame rate limiting - enforce minimum time between updates
-        elapsed = current_time - self.last_update_time
-        if elapsed < self.update_interval:
+        # Skip extremely rapid updates (less than 10ms apart) to prevent CPU overload
+        if current_time - self.last_update_time < 0.01:
             return False
             
-        # Use downsampled data fingerprinting for faster comparison
-        # This is much more efficient than processing the full array
+        # Check for meaningful data changes with a more reliable hash method
         if data is not None and data.size > 0:
-            # Check if data shape changed
-            if self.last_data_shape != data.shape:
-                self.last_data_shape = data.shape
-                self.last_update_time = current_time
-                return True
-                
-            # Fast downsampled checksum for large arrays
-            if data.size > 10000:
-                # Take downsampled data points using strided slicing (much faster)
-                stride = max(1, data.shape[0] // 20, data.shape[1] // 20)
-                sample = data[::stride, ::stride]
-                data_sum = np.sum(sample)
-                nonzeros = np.count_nonzero(sample)
-            else:
-                # For smaller arrays, use the whole array
-                data_sum = np.sum(data)
-                nonzeros = np.count_nonzero(data)
-                
-            # Create fingerprint using sum and active cell count
-            data_fingerprint = (int(data_sum * 1000), nonzeros)
-            
-            # Skip update if data hasn't changed significantly
-            if self.last_data_hash is not None:
-                last_sum, last_nonzeros = self.last_data_hash
-                
-                # Calculate relative change
-                sum_change = abs(data_sum - last_sum/1000) / (last_sum/1000 + 1e-10)
-                count_change = abs(nonzeros - last_nonzeros) / (last_nonzeros + 1e-10)
-                
-                # Only update if the change exceeds threshold or on periodic heartbeat
-                if sum_change < self.change_threshold and count_change < self.change_threshold:
-                    # Heartbeat update (lower frequency for unchanged data)
-                    if self.frame_counter % 10 != 0:
-                        return False
+            # Use max value and nonzero count for more reliable change detection
+            data_max = np.max(data) if data.size > 0 else 0
+            nonzero_count = np.count_nonzero(data)
+            data_fingerprint = int((data_max * 1000) + nonzero_count)
         else:
-            data_fingerprint = (0, 0)
-        
-        # Update tracking state
-        self.last_data_hash = data_fingerprint
-        self.last_update_time = current_time
-        return True
+            data_fingerprint = 0
+            
+        # Force update on significant data change
+        if data_fingerprint != self.last_data_hash:
+            self.last_data_hash = data_fingerprint
+            self.last_update_time = current_time
+            return True
+            
+        # Skip update if data hasn't changed and interval hasn't elapsed
+        return False
         
     def should_update_contours(self):
         """
@@ -147,18 +115,29 @@ class HeatmapOptimizer:
         Returns:
             bool: True if canvas should be redrawn, False otherwise.
         """
+        # Calculate time since last draw
         current_time = time.time()
-        min_interval = 1.0 / self.max_fps
+        elapsed = current_time - self.last_draw_time
         
-        # Always redraw during startup
-        if self.frame_counter <= 10:
+        # Calculate minimum time between frames based on max_fps
+        min_frame_time = 1.0 / self.max_fps
+        
+        # Always draw during startup phase for responsiveness
+        if self.startup_phase or self.frame_counter <= 100:
             self.last_draw_time = current_time
             return True
             
-        # Limit frame rate to max_fps
-        if current_time - self.last_draw_time < min_interval:
+        # CRITICAL FIX: Ensure at least one redraw per second regardless of other conditions
+        # This prevents the display from appearing frozen even when data isn't changing
+        if elapsed > 1.0:
+            self.last_draw_time = current_time
+            return True
+            
+        # Enforce frame rate limit
+        if elapsed < min_frame_time:
             return False
             
+        # Update last draw time and allow redraw
         self.last_draw_time = current_time
         return True
     
@@ -169,7 +148,9 @@ class HeatmapOptimizer:
         Args:
             interval: Time in seconds.
         """
-        self.update_interval = max(0.05, float(interval))
+        # CRITICAL FIX: Ensure update_interval is never too large
+        # Max value of 0.25 seconds ensures updates at least 4 times per second
+        self.update_interval = max(0.05, min(0.25, float(interval)))
     
     def set_contour_interval(self, interval):
         """
@@ -205,9 +186,6 @@ class HeatmapOptimizer:
             self.set_contour_interval(max_time_interval)
             
         if change_threshold_percent is not None:
-            # Set change threshold as a fraction (from percentage)
-            self.change_threshold = change_threshold_percent / 100.0
-            
             # Convert percentage to equivalent FPS value (higher percentage = lower FPS)
             # This is an approximation - higher threshold means we can accept lower FPS
             fps = 60 - (change_threshold_percent / 2)  # Scale: 0% -> 60fps, 100% -> 10fps
