@@ -12,7 +12,8 @@ from PyQt5.QtWidgets import (
     QSlider, QComboBox, QLineEdit, QSpinBox, QCheckBox,
     QPushButton, QProgressBar, QFormLayout, QButtonGroup,
     QRadioButton, QFileDialog, QDoubleSpinBox, QTabWidget,
-    QGridLayout, QFrame, QDialog, QListWidget, QListWidgetItem
+    QGridLayout, QFrame, QDialog, QListWidget, QListWidgetItem,
+    QInputDialog
 )
 from PyQt5.QtGui import QPixmap, QColor, QPainter, QIcon
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QSize, QDateTime, QThread
@@ -26,6 +27,7 @@ import glob
 from PyQt5.QtWidgets import QApplication
 import numpy as np
 import math
+from datetime import datetime
 
 
 class ControlPanel(QWidget):
@@ -80,7 +82,7 @@ class ControlPanel(QWidget):
     
     # ROS2 Bag and Point Cloud signals
     play_rosbag = pyqtSignal(str)  # Path to bag file
-    record_rosbag = pyqtSignal(str, list, int)  # Path, topics, and duration in minutes to record
+    record_rosbag = pyqtSignal(str, list, int)  # Path, topics, and duration in seconds to record
     stop_rosbag = pyqtSignal()  # Stop recording or playback
     timeline_position_changed = pyqtSignal(float)  # Bag playback position (0.0-1.0)
     visualize_pointcloud = pyqtSignal(str)  # Point cloud topic
@@ -366,6 +368,14 @@ class ControlPanel(QWidget):
                 image: url(/home/zen/Pictures/Radar_stuff/icons/dropdown.png);
                 width: 12px;
                 height: 12px;
+            }
+            QComboBox QAbstractItemView {
+                border: 1px solid #BDBDBD;
+                background-color: #F5F5F5;
+                color: #212121;
+                selection-background-color: #E0E0E0;
+                selection-color: #212121;
+                padding: 2px;
             }
         """)
         target_label = QLabel("Target Distance:")
@@ -1108,10 +1118,32 @@ class ControlPanel(QWidget):
         duration_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         duration_label.setMinimumWidth(50)
         
+        # Create time unit selection combobox
+        self.duration_unit_combo = QComboBox()
+        self.duration_unit_combo.addItems(["sec", "min"])
+        self.duration_unit_combo.setCurrentIndex(0)  # Default to seconds
+        self.duration_unit_combo.setMaximumWidth(60)
+        self.duration_unit_combo.setStyleSheet("""
+            QComboBox {
+                border: 1px solid #BDBDBD;
+                border-radius: 4px;
+                padding: 2px 5px;
+                background-color: #FFFFFF;
+                color: #212121;
+            }
+            QComboBox QAbstractItemView {
+                border: 1px solid #BDBDBD;
+                background-color: #F5F5F5;
+                color: #212121;
+                selection-background-color: #E0E0E0;
+                selection-color: #212121;
+            }
+        """)
+        self.duration_unit_combo.currentIndexChanged.connect(self.on_duration_unit_changed)
+        
         self.record_duration_spin = QSpinBox()
-        self.record_duration_spin.setRange(0, 60)  # 0 means no time limit
+        self.record_duration_spin.setRange(0, 3600)  # 0 means no time limit, up to 3600 seconds
         self.record_duration_spin.setValue(0)
-        self.record_duration_spin.setSuffix(" min")
         self.record_duration_spin.setSpecialValueText("No limit")  # Show "No limit" when value is 0
         self.record_duration_spin.setToolTip("Recording duration (0 = no time limit)")
         self.record_duration_spin.setMinimumHeight(28)
@@ -1136,6 +1168,7 @@ class ControlPanel(QWidget):
         
         duration_layout.addWidget(duration_label, 1)
         duration_layout.addWidget(self.record_duration_spin, 3)
+        duration_layout.addWidget(self.duration_unit_combo, 1)
         recording_layout.addLayout(duration_layout)
         
         # Add estimated bag size label
@@ -1284,8 +1317,12 @@ class ControlPanel(QWidget):
         # Get the last used directory or use home directory as default
         last_dir = self.last_used_directory() or os.path.expanduser("~")
         
+        # Create a default filename based on timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_bag_name = f"radar_data_{timestamp}"
+        
         # Create a non-modal directory dialog for better UI responsiveness
-        dialog = QFileDialog(self, "Select Directory to Save Bag", last_dir)
+        dialog = QFileDialog(self, "Select Location to Save ROS2 Bag", last_dir)
         dialog.setFileMode(QFileDialog.Directory)
         dialog.setOption(QFileDialog.ShowDirsOnly, True)
         dialog.setOption(QFileDialog.DontUseNativeDialog, True)
@@ -1294,9 +1331,35 @@ class ControlPanel(QWidget):
         if dialog.exec_() == QFileDialog.Accepted:
             selected_dirs = dialog.selectedFiles()
             if selected_dirs:
-                dir_path = selected_dirs[0]
-                self.record_path_edit.setText(dir_path)
-                self.save_last_used_directory(dir_path)
+                base_dir = selected_dirs[0]
+                
+                # Suggest a full path including the timestamped subdirectory
+                full_path = os.path.join(base_dir, default_bag_name)
+                
+                # Ask if the user wants to use the suggested subdirectory
+                from PyQt5.QtWidgets import QInputDialog
+                bag_name, ok = QInputDialog.getText(
+                    self,
+                    "Bag Name",
+                    "Enter a name for the ROS2 bag directory:",
+                    text=default_bag_name
+                )
+                
+                if ok and bag_name:
+                    # Create the full path with the user's chosen name
+                    full_path = os.path.join(base_dir, bag_name)
+                
+                # Update the UI and save the last used directory
+                self.record_path_edit.setText(full_path)
+                self.save_last_used_directory(base_dir)
+                
+                # Try to create the directory now
+                try:
+                    os.makedirs(full_path, exist_ok=True)
+                    self.set_status(f"Ready to record to {os.path.basename(full_path)}")
+                except Exception as e:
+                    self.set_status(f"Error creating directory: {e}")
+                
                 return True
         return False
     
@@ -2142,12 +2205,21 @@ class ControlPanel(QWidget):
 
     def update_bag_size_estimate(self):
         """Update the estimated bag size label based on the recording duration."""
-        duration_minutes = self.record_duration_spin.value()
+        duration_value = self.record_duration_spin.value()
         
         # If duration is 0 (unlimited), show as "unknown"
-        if duration_minutes == 0:
+        if duration_value == 0:
             self.bag_size_label.setText("Est. size: Unknown (unlimited duration)")
             return
+        
+        # Convert to minutes for size estimation
+        duration_unit = "sec"
+        if hasattr(self, 'duration_unit_combo'):
+            duration_unit = self.duration_unit_combo.currentText()
+        
+        duration_minutes = duration_value
+        if duration_unit == "sec":
+            duration_minutes = duration_value / 60.0
         
         # Estimate bag size based on common datatypes
         # Assumptions:
@@ -2176,9 +2248,21 @@ class ControlPanel(QWidget):
         elif total_size_bytes < 1024 * 1024 * 1024:
             size_str = f"{total_size_bytes / (1024 * 1024):.1f} MB"
         else:
-            size_str = f"{total_size_bytes / (1024 * 1024 * 1024):.2f} GB"
+            size_str = f"{total_size_bytes / (1024 * 1024 * 1024):.1f} GB"
         
-        self.bag_size_label.setText(f"Est. size: {size_str}")
+        # Create a formatted duration text for the label
+        if duration_unit == "min":
+            duration_text = f"{duration_value} min"
+        else:
+            # For seconds, convert to min:sec format if over 60 seconds
+            if duration_value >= 60:
+                minutes = duration_value // 60
+                seconds = duration_value % 60
+                duration_text = f"{minutes}:{seconds:02d} min"
+            else:
+                duration_text = f"{duration_value} sec"
+        
+        self.bag_size_label.setText(f"Est. size: {size_str} ({duration_text})")
     
     def discover_rosbags(self):
         """Find available ROS2 bag files in common directories without freezing the UI."""
@@ -2482,9 +2566,41 @@ class ControlPanel(QWidget):
 
     def on_record_rosbag(self):
         """Handle record bag button."""
+        # Get the recording path
         record_path = self.record_path_edit.text().strip()
         if not record_path:
-            self.set_status("Please select a directory to save the bag")
+            # If path is empty, show a save dialog to let the user choose a location and filename
+            default_dir = self.last_used_directory() or os.path.expanduser("~")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            default_filename = f"radar_data_{timestamp}"
+            
+            # Create a directory for the bag if it doesn't exist
+            suggested_path = os.path.join(default_dir, default_filename)
+            
+            # Show directory selection dialog
+            record_path = QFileDialog.getExistingDirectory(
+                self, 
+                "Select Directory to Save ROS2 Bag",
+                default_dir,
+                QFileDialog.ShowDirsOnly
+            )
+            
+            if not record_path:
+                self.set_status("Recording cancelled: No save location selected")
+                return
+                
+            # Use timestamp to create a subdirectory
+            record_path = os.path.join(record_path, default_filename)
+            
+            # Update the text field
+            self.record_path_edit.setText(record_path)
+            self.save_last_used_directory(os.path.dirname(record_path))
+        
+        # Create the directory if it doesn't exist
+        try:
+            os.makedirs(record_path, exist_ok=True)
+        except Exception as e:
+            self.set_status(f"Error creating directory: {e}")
             return
         
         topics = [t.strip() for t in self.topics_edit.text().split(',') if t.strip()]
@@ -2496,14 +2612,33 @@ class ControlPanel(QWidget):
         if not hasattr(self, 'main_window') or self.main_window is None:
             print("Warning: No main window reference available. Using direct signal.")
             # Just emit the signal and let the connected slot handle it
-            duration = self.duration_spin.value()
+            duration = self.record_duration_spin.value()
             self.record_rosbag.emit(record_path, topics, duration)
             self.set_status(f"Recording to {os.path.basename(record_path)}")
             return
         
-        # Get the recording duration
-        duration_minutes = self.record_duration_spin.value()
-        duration_text = "without time limit" if duration_minutes == 0 else f"for {duration_minutes} min"
+        # Get the recording duration based on the unit selected
+        duration_value = self.record_duration_spin.value()
+        duration_unit = self.duration_unit_combo.currentText()
+        
+        # Convert to seconds for the API call (ROS2 bag API uses seconds)
+        duration_seconds = duration_value
+        if duration_unit == "min" and duration_value > 0:
+            duration_seconds = duration_value * 60
+        
+        # Format duration text for status message
+        if duration_value == 0:
+            duration_text = "without time limit"
+        else:
+            if duration_unit == "min":
+                duration_text = f"for {duration_value} min"
+            else:
+                minutes = duration_value // 60
+                seconds = duration_value % 60
+                if minutes > 0:
+                    duration_text = f"for {minutes} min {seconds} sec"
+                else:
+                    duration_text = f"for {seconds} sec"
         
         # If we're also collecting data, make sure the experiment data is cleared
         if self.main_window and self.main_window.analyzer:
@@ -2522,20 +2657,20 @@ class ControlPanel(QWidget):
         # Use state manager to update UI state
         self.state_manager.transition('start_recording')
         
-        # Start recording, passing the duration parameter
-        self.record_rosbag.emit(record_path, topics, duration_minutes)
-        self.set_status(f"Recording to {record_path} {duration_text}: {', '.join(topics)}")
+        # Start recording, passing the duration parameter in seconds
+        self.record_rosbag.emit(record_path, topics, duration_seconds)
+        self.set_status(f"Recording to {os.path.basename(record_path)} {duration_text}: {', '.join(topics)}")
         
         # If a duration is set, start a timer to stop recording automatically
-        if duration_minutes > 0:
-            # Convert minutes to milliseconds
-            duration_ms = duration_minutes * 60 * 1000
+        if duration_seconds > 0:
+            # Convert to milliseconds for the timer
+            duration_ms = duration_seconds * 1000
             
             # Create a single-shot timer to stop recording after the specified duration
             QTimer.singleShot(duration_ms, self.on_recording_timeout)
             
             # Store the expected end time for UI updates
-            self.recording_end_time = time.time() + (duration_minutes * 60)
+            self.recording_end_time = time.time() + duration_seconds
 
     def on_recording_timeout(self):
         """Called when the recording timer expires."""
@@ -2701,3 +2836,31 @@ class ControlPanel(QWidget):
             self.set_status("ROS2 not available - only collection mode available")
         else:
             self.set_status("Ready")
+
+    def on_duration_unit_changed(self, index):
+        """Handle change in duration unit (seconds or minutes).
+        
+        Args:
+            index: Index of the selected unit (0=seconds, 1=minutes)
+        """
+        current_value = self.record_duration_spin.value()
+        if current_value == 0:  # No limit case
+            return
+            
+        # Convert between units while preserving the actual duration
+        if index == 0:  # Switched to seconds
+            # If previously in minutes, convert to seconds
+            self.record_duration_spin.setRange(0, 3600)  # Up to 1 hour in seconds
+            if hasattr(self, '_previous_unit') and self._previous_unit == 1:
+                self.record_duration_spin.setValue(current_value * 60)
+        else:  # Switched to minutes
+            # If previously in seconds, convert to minutes
+            self.record_duration_spin.setRange(0, 60)  # Up to 1 hour in minutes
+            if hasattr(self, '_previous_unit') and self._previous_unit == 0:
+                self.record_duration_spin.setValue(max(1, current_value // 60))
+                
+        # Store current unit for next change
+        self._previous_unit = index
+        
+        # Update the bag size estimate
+        self.update_bag_size_estimate()
