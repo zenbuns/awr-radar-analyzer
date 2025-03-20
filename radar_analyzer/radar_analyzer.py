@@ -137,6 +137,7 @@ class RadarPointCloudAnalyzer(Node):
         
         # Multi-frame processing containers
         self.frame_buffer = []
+        self.frame_count = 0  # Initialize frame count for memory management
         self.combined_frame = {
             'x': np.array([], dtype=np.float32),
             'y': np.array([], dtype=np.float32),
@@ -997,6 +998,9 @@ class RadarPointCloudAnalyzer(Node):
                 # Reset frame buffer if multi-frame processing is enabled
                 if self.params.enable_multi_frame:
                     self.frame_buffer = []
+                    self.frame_count = 0  # Reset frame count for memory management
+                    
+                    # Reset combined frame data too
                     self.combined_frame = {
                         'x': np.array([], dtype=np.float32),
                         'y': np.array([], dtype=np.float32),

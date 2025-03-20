@@ -43,11 +43,25 @@ def process_multi_frame_data(
         'timestamp': time.time()
     }
     
-    # Add to buffer
+    # CRITICAL: Add memory management
+    # 1. Set a hard limit on buffer growth
+    MAX_BUFFER_SIZE = 100  # Absolute maximum to prevent memory issues
+    
+    # 2. Clear entire buffer occasionally to prevent memory fragmentation
+    if hasattr(analyzer, 'frame_count'):
+        analyzer.frame_count += 1
+        # Every 1000 frames, do a complete buffer reset to prevent memory fragmentation
+        if analyzer.frame_count > 1000:
+            analyzer.frame_buffer = []
+            analyzer.frame_count = 0
+    else:
+        analyzer.frame_count = 1
+    
+    # 3. Add to buffer with proper limiting
     analyzer.frame_buffer.append(current_frame)
     
-    # Keep only the most recent frames up to multi_frame_count
-    if len(analyzer.frame_buffer) > analyzer.params.multi_frame_count:
+    # Remove oldest frames to maintain size limit
+    while len(analyzer.frame_buffer) > min(analyzer.params.multi_frame_count, MAX_BUFFER_SIZE):
         analyzer.frame_buffer.pop(0)
     
     # Only process if we have enough frames
@@ -464,6 +478,21 @@ def compute_multi_frame_metrics(analyzer) -> None:
     
     if analyzer.collecting_data:
         analyzer.get_logger().info(f"Multi-frame metrics updated: {len(analyzer.combined_frame['x'])} points")
+
+    # IMPORTANT: Memory management - release large temporary data arrays
+    # Only keep the combined frame results and metrics, allow other temporary arrays to be garbage collected
+    temporary_arrays = []
+    for frame in analyzer.frame_buffer:
+        frame.pop('x_grid', None)
+        frame.pop('y_grid', None)
+        frame.pop('temp_grid', None)
+        
+    # Force garbage collection if the system supports it
+    try:
+        import gc
+        gc.collect()
+    except ImportError:
+        pass
 
 
 def load_latest_multi_frame_metrics(analyzer) -> bool:

@@ -192,11 +192,10 @@ def record_rosbag(analyzer, output_path: str, topics: List[str], duration_minute
 
 
 def stop_rosbag(analyzer) -> None:
-    """
-    Stop ROS2 bag playback or recording and perform thorough cleanup.
+    """Stop the currently playing or recording ROS2 bag.
     
-    This method ensures all ROS2 bag processes are completely terminated,
-    message queues are cleared, and the analyzer is reset to a clean state.
+    This method terminates any active ROS2 bag playback or recording,
+    and cleans up related resources.
     
     Args:
         analyzer: RadarPointCloudAnalyzer instance.
@@ -212,8 +211,13 @@ def stop_rosbag(analyzer) -> None:
     # 1. Kill the primary rosbag process if it exists
     if hasattr(analyzer, 'rosbag_proc') and analyzer.rosbag_proc is not None:
         try:
+            # Get process info before killing
+            pid = analyzer.rosbag_proc.pid
+            
             # Get the process group ID before killing
-            pgid = os.getpgid(analyzer.rosbag_proc.pid)
+            pgid = os.getpgid(pid)
+            
+            analyzer.get_logger().info(f"Stopping ROS2 bag process {pid} (group {pgid})")
             
             # Terminate the process group to ensure all child processes are killed
             analyzer.get_logger().info(f"Sending SIGINT to process group {pgid}")
@@ -221,37 +225,66 @@ def stop_rosbag(analyzer) -> None:
             
             # Wait a short time for graceful termination
             try:
-                analyzer.rosbag_proc.wait(timeout=2)
+                exit_code = analyzer.rosbag_proc.wait(timeout=3)
+                analyzer.get_logger().info(f"ROS2 bag process {pid} terminated with exit code: {exit_code}")
             except subprocess.TimeoutExpired:
                 # Force kill if it doesn't terminate gracefully
                 analyzer.get_logger().warn(f"Sending SIGKILL to process group {pgid}")
                 os.killpg(pgid, signal.SIGKILL)
+                
+                try:
+                    exit_code = analyzer.rosbag_proc.wait(timeout=2)
+                    analyzer.get_logger().info(f"ROS2 bag process {pid} killed with exit code: {exit_code}")
+                except subprocess.TimeoutExpired:
+                    analyzer.get_logger().error(f"Failed to kill ROS2 bag process {pid} even with SIGKILL")
             
             # Clean up any zombie processes
             try:
                 # Use psutil to ensure all child processes are terminated
-                parent = psutil.Process(analyzer.rosbag_proc.pid)
-                for child in parent.children(recursive=True):
-                    child.kill()
-                parent.kill()
-            except psutil.NoSuchProcess:
-                pass  # Process already terminated
+                import psutil
+                try:
+                    parent = psutil.Process(pid)
+                    for child in parent.children(recursive=True):
+                        analyzer.get_logger().warn(f"Killing child process: {child.pid}")
+                        child.kill()
+                    if parent.is_running():
+                        analyzer.get_logger().warn(f"Killing parent process: {parent.pid}")
+                        parent.kill()
+                except psutil.NoSuchProcess:
+                    analyzer.get_logger().info(f"Process {pid} already terminated")
+            except ImportError:
+                analyzer.get_logger().warn("psutil not available, skipping zombie process checks")
+            except Exception as e:
+                analyzer.get_logger().error(f"Error during process cleanup: {str(e)}")
             
-            analyzer.rosbag_proc = None
         except Exception as e:
             analyzer.get_logger().error(f"Error stopping primary ROS2 bag process: {str(e)}")
             cleanup_success = False
+        finally:
+            # CRITICAL: Always clear the process reference
+            analyzer.rosbag_proc = None
     
     # 2. Find and kill any other ros2 bag processes that might be running
     try:
+        import psutil
+        cleaned_orphans = False
+        
         for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
             try:
                 cmdline = proc.info['cmdline']
                 if cmdline and 'ros2' in cmdline and 'bag' in cmdline:
-                    analyzer.get_logger().warn(f"Killing residual ROS2 bag process: {proc.info['pid']}")
+                    analyzer.get_logger().warn(f"Killing orphaned ROS2 bag process: {proc.info['pid']}")
                     proc.kill()
+                    cleaned_orphans = True
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
+            except Exception as e:
+                analyzer.get_logger().error(f"Error killing process: {str(e)}")
+        
+        if cleaned_orphans:
+            analyzer.get_logger().info("Cleaned up orphaned ROS2 bag processes")
+    except ImportError:
+        analyzer.get_logger().warn("psutil not available, cannot check for orphaned processes")
     except Exception as e:
         analyzer.get_logger().error(f"Error killing residual ROS2 bag processes: {str(e)}")
         
