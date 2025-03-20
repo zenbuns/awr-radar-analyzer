@@ -13,9 +13,10 @@ from datetime import datetime
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QAction, QMenu, QToolBar, QStatusBar, QFileDialog, QMessageBox,
-    QLabel, QFrame, QPushButton, QSizePolicy, QApplication
+    QLabel, QFrame, QPushButton, QSizePolicy, QApplication, QProgressDialog,
+    QProgressBar, QTabWidget
 )
-from PyQt5.QtCore import Qt, QTimer, pyqtSlot, QSize, QUrl
+from PyQt5.QtCore import Qt, QTimer, pyqtSlot, QSize, QUrl, QThread, pyqtSignal
 from PyQt5.QtGui import QIcon, QPixmap, QFont, QDesktopServices
 
 from ui.scatter_view import ScatterView
@@ -23,6 +24,7 @@ from ui.heatmap_view import HeatmapView
 from ui.control_panel import ControlPanel
 from utils.visualization import save_scientific_visualization
 from .styles import DARK_STYLESHEET, Colors, apply_mpl_style
+from ui.point_cloud_view import PointCloudView
 
 
 class MainWindow(QMainWindow):
@@ -61,7 +63,7 @@ class MainWindow(QMainWindow):
         apply_mpl_style()
         
         # Set up the UI
-        self.setup_ui()
+        self.init_ui()
         
         # Connect signals and slots
         self.connect_signals()
@@ -71,85 +73,93 @@ class MainWindow(QMainWindow):
         self.update_timer.timeout.connect(self.update_visualizations)
         self.update_timer.start(100)  # 10 Hz update rate
         
+        # Apply automatic optimization to the visualization pipeline
+        # Use QTimer to delay this until after UI is fully initialized
+        QTimer.singleShot(1000, self.optimize_visualization_pipeline)
+        
         # Set window title, size, and style
         self.setWindowTitle("AWR1843 Radar Analyzer")
         self.resize(1600, 900)  # Larger default size
         self.setStyleSheet(DARK_STYLESHEET)
     
-    def setup_ui(self):
-        """Set up the UI components."""
-        # Create central widget
-        central_widget = QWidget(self)
-        self.setCentralWidget(central_widget)
+    def init_ui(self):
+        """Initialize the main UI layout."""
+        # Create main layout
+        self.central_widget = QWidget()
+        self.setCentralWidget(self.central_widget)
         
-        # Main layout is vertical: header + content + footer
-        main_layout = QVBoxLayout(central_widget)
-        main_layout.setContentsMargins(8, 8, 8, 8)
-        main_layout.setSpacing(10)
+        main_layout = QHBoxLayout(self.central_widget)
+        main_layout.setSpacing(0)
+        main_layout.setContentsMargins(0, 0, 0, 0)
         
-        # App header with title and logo
-        header_frame = QFrame()
-        header_frame.setObjectName("header")
-        header_frame.setStyleSheet("#header { border-bottom: 1px solid " + Colors.BORDER + "; }")
-        header_layout = QHBoxLayout(header_frame)
-        header_layout.setContentsMargins(0, 0, 0, 10)
+        # Add splitter for control panel and visualization area
+        splitter = QSplitter(Qt.Horizontal)
         
-        # App title
-        title_label = QLabel("AWR1843 Radar Point Cloud Analyzer")
-        title_label.setFont(QFont("Segoe UI", 14, QFont.Bold))
-        header_layout.addWidget(title_label)
+        # Create and add control panel to splitter
+        self.control_panel = ControlPanel(self)
+        splitter.addWidget(self.control_panel)
         
-        # Add header to main layout
-        main_layout.addWidget(header_frame)
+        # Create visualization container
+        viz_container = QWidget()
+        viz_layout = QHBoxLayout(viz_container)
+        viz_layout.setContentsMargins(0, 0, 0, 0)
         
-        # Content is horizontal layout with controls on left and visualizations on right
-        content_layout = QHBoxLayout()
-        content_layout.setSpacing(10)
+        # Create tabbed interface for visualizations
+        tabs = QTabWidget()
         
-        # Control panel on the left (extra wide)
-        self.control_panel = ControlPanel()
-        # Give control panel direct access to the analyzer
-        self.control_panel.main_window = self
-        self.control_panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
-        self.control_panel.setMinimumWidth(800)  # Ensure extra wide minimum width of control panel
-        self.control_panel.setMaximumWidth(1500)  # Wider limit for control panel
+        # Create and add 3D view tab
+        self.point_cloud_view = PointCloudView(self)
+        tabs.addTab(self.point_cloud_view, "3D View")
         
-        # Content splitter for visualizations (wider)
-        content_splitter = QSplitter(Qt.Vertical)
-        content_splitter.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # Create and add scatter view tab
+        self.scatter_view = ScatterView(self)
+        tabs.addTab(self.scatter_view, "Scatter Plot")
         
-        # Create scatter view
-        self.scatter_view = ScatterView()
-        self.scatter_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.scatter_view.setMinimumHeight(350)  # Ensure minimum height
-        content_splitter.addWidget(self.scatter_view)
+        # Create and add heatmap view tab
+        self.heatmap_view = HeatmapView(self)
+        tabs.addTab(self.heatmap_view, "Heatmap")
         
-        # Create heatmap view
-        self.heatmap_view = HeatmapView()
-        self.heatmap_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.heatmap_view.setMinimumHeight(350)  # Ensure minimum height
-        content_splitter.addWidget(self.heatmap_view)
+        # Set current tab to heatmap
+        tabs.setCurrentIndex(2)
         
-        # Set sizes for the splitter
-        content_splitter.setSizes([500, 500])  # Equal sizes initially
+        # Add tabs to visualization layout
+        viz_layout.addWidget(tabs)
         
-        # Add control panel and visualizations to content layout
-        content_layout.addWidget(self.control_panel, 3)  # Give control panel even more space
-        content_layout.addWidget(content_splitter, 2)  # Content gets less relative space (2:3 ratio)
+        # Add visualization container to splitter
+        splitter.addWidget(viz_container)
         
-        # Add content to main layout
-        main_layout.addLayout(content_layout)
+        # Set splitter sizes
+        splitter.setSizes([250, 750])
         
-        # Set up status bar
+        # Add splitter to main layout
+        main_layout.addWidget(splitter)
+        
+        # Create status bar
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Ready")
         
-        # Setup menu bar
-        self.create_menu_bar()
+        # Create progress bar for long operations
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setRange(0, 100)
+        self.status_bar.addPermanentWidget(self.progress_bar)
         
-        # Setup toolbar
+        # Additional UI setup as needed
+        self.create_menu_bar()
         self.create_toolbar()
+        
+        # Set window properties
+        self.setGeometry(100, 100, 1280, 800)
+        self.setWindowTitle('AWR Radar Analyzer')
+        
+        # Set up update timer for real-time visualizations
+        self.update_timer = QTimer()
+        self.update_timer.timeout.connect(self.update_visualizations)
+        self.update_timer.start(100)  # Update 10 times per second initially
+        
+        # Schedule auto-optimization to run after the UI is fully initialized
+        QTimer.singleShot(2000, self.optimize_visualization_pipeline)
     
     def create_menu_bar(self):
         """Create the application menu bar."""
@@ -202,6 +212,29 @@ class MainWindow(QMainWindow):
         reset_heatmap_action.setShortcut("Ctrl+R")
         reset_heatmap_action.triggered.connect(self.reset_heatmap)
         view_menu.addAction(reset_heatmap_action)
+        
+        view_menu.addSeparator()
+        
+        # Visualization performance submenu
+        perf_menu = view_menu.addMenu("&Performance Settings")
+        
+        high_perf_action = QAction("&High Performance", self)
+        high_perf_action.triggered.connect(lambda: self.configure_heatmap_update_params(0.1, 0.5, 30))
+        perf_menu.addAction(high_perf_action)
+        
+        medium_perf_action = QAction("&Medium Performance", self)
+        medium_perf_action.triggered.connect(lambda: self.configure_heatmap_update_params(0.2, 0.7, 20))
+        perf_menu.addAction(medium_perf_action)
+        
+        low_perf_action = QAction("&Low Performance", self)
+        low_perf_action.triggered.connect(lambda: self.configure_heatmap_update_params(0.3, 1.0, 15))
+        perf_menu.addAction(low_perf_action)
+        
+        perf_menu.addSeparator()
+        
+        auto_perf_action = QAction("&Auto-Optimize", self)
+        auto_perf_action.triggered.connect(self.optimize_visualization_pipeline)
+        perf_menu.addAction(auto_perf_action)
         
         view_menu.addSeparator()
         
@@ -317,68 +350,82 @@ class MainWindow(QMainWindow):
         if self.analyzer is None:
             return
         
-        with self.analyzer.data_lock:
-            # Update scatter plot data
-            x = self.analyzer.current_data['x']
-            y = self.analyzer.current_data['y']
-            intensities = self.analyzer.current_data['intensities']
-            
-            # Get circle data for all circles
-            circles_data = []
-            circle_stats = []
-            
-            # For now we're only using the primary circle from the analyzer until we update it
-            # to handle multiple circles
-            circle_x = self.analyzer.current_data['circle_x']
-            circle_y = self.analyzer.current_data['circle_y']
-            circle_intensities = self.analyzer.current_data['circle_intensities']
-            
-            # Mock data for additional circles - in a real implementation, the analyzer would
-            # provide data for all circles
-            for i in range(3):
-                if i == 0:
-                    # Primary circle (use actual data)
-                    circles_data.append({
-                        'x': circle_x,
-                        'y': circle_y,
-                        'intensities': circle_intensities
-                    })
-                    
-                    # Calculate circle statistics
-                    circle_count = len(circle_x)
-                    circle_avg_intensity = (
-                        float(np.mean(circle_intensities))
-                        if len(circle_intensities) > 0
-                        else 0.0
-                    )
-                    
-                    circle_stats.append({
-                        'count': circle_count,
-                        'avg_intensity': circle_avg_intensity
-                    })
-                else:
-                    # Mock data for other circles (empty for now)
-                    circles_data.append({
-                        'x': np.array([], dtype=np.float32),
-                        'y': np.array([], dtype=np.float32),
-                        'intensities': np.array([], dtype=np.float32)
-                    })
-                    
-                    circle_stats.append({
-                        'count': 0,
-                        'avg_intensity': 0.0
-                    })
-            
-            # Update views with all circle data
-            self.scatter_view.update_plot_data(x, y, intensities, circles_data)
-            self.scatter_view.update_circle_stats(circle_stats)
-            
-            # Update heatmap data
-            self.heatmap_view.update_heatmap_data(self.analyzer.live_heatmap_data)
-            
-            # Update analysis metrics
-            metrics = self.analyzer.compute_heatmap_metrics()
-            self.control_panel.update_metrics(metrics)
+        try:
+            with self.analyzer.data_lock:
+                # Update scatter plot data
+                x = self.analyzer.current_data['x']
+                y = self.analyzer.current_data['y']
+                intensities = self.analyzer.current_data['intensities']
+                
+                # Get circle data for all circles
+                circles_data = []
+                circle_stats = []
+                
+                # For now we're only using the primary circle from the analyzer until we update it
+                # to handle multiple circles
+                circle_x = self.analyzer.current_data['circle_x']
+                circle_y = self.analyzer.current_data['circle_y']
+                circle_intensities = self.analyzer.current_data['circle_intensities']
+                
+                # Mock data for additional circles - in a real implementation, the analyzer would
+                # provide data for all circles
+                for i in range(3):
+                    if i == 0:
+                        # Primary circle (use actual data)
+                        circles_data.append({
+                            'x': circle_x,
+                            'y': circle_y,
+                            'intensities': circle_intensities
+                        })
+                        
+                        # Calculate circle statistics
+                        circle_count = len(circle_x)
+                        circle_avg_intensity = (
+                            float(np.mean(circle_intensities))
+                            if len(circle_intensities) > 0
+                            else 0.0
+                        )
+                        
+                        circle_stats.append({
+                            'count': circle_count,
+                            'avg_intensity': circle_avg_intensity
+                        })
+                    else:
+                        # Mock data for other circles (empty for now)
+                        circles_data.append({
+                            'x': np.array([], dtype=np.float32),
+                            'y': np.array([], dtype=np.float32),
+                            'intensities': np.array([], dtype=np.float32)
+                        })
+                        
+                        circle_stats.append({
+                            'count': 0,
+                            'avg_intensity': 0.0
+                        })
+                
+                # Update views with all circle data
+                self.scatter_view.update_plot_data(x, y, intensities, circles_data)
+                self.scatter_view.update_circle_stats(circle_stats)
+                
+                # Get a reference to heatmap data (avoid copying the large array if possible)
+                heatmap_data = self.analyzer.live_heatmap_data
+                
+                # Update heatmap data through the improved, optimized pipeline
+                self.heatmap_view.update_heatmap_data(heatmap_data)
+                
+                # Update analysis metrics - only do this periodically as it's CPU intensive
+                # Use a counter to update every 10 frames to reduce CPU load
+                if not hasattr(self, '_metrics_update_counter'):
+                    self._metrics_update_counter = 0
+                
+                if self._metrics_update_counter % 10 == 0:
+                    metrics = self.analyzer.compute_heatmap_metrics()
+                    self.control_panel.update_metrics(metrics)
+                
+                self._metrics_update_counter += 1
+        except Exception as e:
+            # Silently handle errors to avoid crashing the UI
+            pass
     
     @pyqtSlot(int, float)
     def update_circle_distance(self, index, distance):
@@ -643,51 +690,190 @@ class MainWindow(QMainWindow):
             return
         
         try:
+            # Use state manager to lock UI during export if available
+            if hasattr(self.control_panel, 'state_manager'):
+                self.control_panel.state_manager.transition('lock_ui')
+            
+            # Ensure the export directory exists
+            export_dir = os.path.join(os.path.expanduser("~"), "radar_experiment_data", "exports")
+            os.makedirs(export_dir, exist_ok=True)
+            
+            # Get last used directory or default to exports directory
+            default_dir = export_dir
+            if hasattr(self.control_panel, 'last_used_directory'):
+                last_dir = self.control_panel.last_used_directory()
+                if last_dir and os.path.exists(last_dir):
+                    default_dir = last_dir
+            
+            # Generate default filename with timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            config_name = self.control_panel.config_entry.text().strip() or "default_config"
+            default_filename = f"radar_plot_{config_name}_{timestamp}.png"
+            
+            # Show directory selection dialog first
+            export_dir = QFileDialog.getExistingDirectory(
+                self,
+                "Select Export Directory",
+                default_dir,
+                QFileDialog.ShowDirsOnly
+            )
+            
+            if not export_dir:
+                # User canceled, unlock UI and return
+                if hasattr(self.control_panel, 'state_manager'):
+                    self.control_panel.state_manager.transition('unlock_ui')
+                return
+            
+            # Now show file name dialog
             file_path, _ = QFileDialog.getSaveFileName(
                 self,
                 "Save Scientific Plot",
-                os.path.expanduser("~/radar_experiment_data/exports"),
+                os.path.join(export_dir, default_filename),
                 "PNG Image (*.png);;PDF Document (*.pdf);;SVG Image (*.svg)"
             )
             
             if not file_path:
+                # User canceled, unlock UI and return
+                if hasattr(self.control_panel, 'state_manager'):
+                    self.control_panel.state_manager.transition('unlock_ui')
                 return
             
-            # Create parent directory if it doesn't exist
-            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            # Save the directory for next time
+            if hasattr(self.control_panel, 'save_last_used_directory'):
+                self.control_panel.save_last_used_directory(os.path.dirname(file_path))
             
-            # Get parameters for visualization
-            config_name = self.control_panel.config_entry.text().strip()
-            if not config_name:
-                config_name = "default_config"
+            # Update status message
+            self.status_bar.showMessage("Exporting plot, please wait...")
+            QApplication.processEvents()  # Force UI update
             
             # Get visualization parameters
             colormap = self.control_panel.colormap_combo.currentText()
-            visualization_mode = next(button.text().lower() for button in self.control_panel.vis_mode_group.buttons() 
-                                     if button.isChecked())
-            if visualization_mode == "heat":
-                visualization_mode = "heatmap"
             
-            noise_floor = float(self.control_panel.noise_value.text())
-            smoothing_sigma = float(self.control_panel.smooth_value.text())
+            # Get visualization mode
+            visualization_mode = "heatmap"  # Default
+            for button in self.control_panel.vis_mode_group.buttons():
+                if button.isChecked():
+                    mode_text = button.text().lower()
+                    if mode_text == "heat":
+                        visualization_mode = "heatmap"
+                    elif mode_text == "contour":
+                        visualization_mode = "contour"
+                    elif mode_text == "combined":
+                        visualization_mode = "combined"
+                    break
             
-            # Call save function
-            save_scientific_visualization(
-                file_path,
-                self.analyzer.live_heatmap_data,
-                self.analyzer.params.max_range,
-                self.analyzer.params.target_distance,
-                self.analyzer.params.circle_distance,
-                self.analyzer.params.circle_radius,
-                self.analyzer.params.circle_interval,
-                config_name,
-                noise_floor,
-                smoothing_sigma,
-                colormap,
-                visualization_mode
-            )
+            # Get noise floor and smoothing parameters
+            try:
+                noise_floor = float(self.control_panel.noise_value.text())
+            except ValueError:
+                noise_floor = 0.1  # Default
+                
+            try:
+                smoothing_sigma = float(self.control_panel.smooth_value.text())
+            except ValueError:
+                smoothing_sigma = 1.0  # Default
             
-            self.status_bar.showMessage(f"Exported plot to {os.path.basename(file_path)}")
+            # Create a progress dialog to show export progress
+            progress_dialog = QProgressDialog("Exporting plot...", "Cancel", 0, 100, self)
+            progress_dialog.setWindowTitle("Exporting")
+            progress_dialog.setWindowModality(Qt.WindowModal)
+            progress_dialog.setMinimumDuration(0)  # Show immediately
+            progress_dialog.setValue(0)
+            
+            # Clone the heatmap data to avoid threading issues
+            heatmap_data_copy = self.analyzer.live_heatmap_data.copy() if self.analyzer.live_heatmap_data is not None else None
+            
+            # Create a callback function for progress updates
+            def progress_callback(progress):
+                # Only update if not canceled
+                if not progress_dialog.wasCanceled():
+                    progress_dialog.setValue(int(progress * 100))
+                    QApplication.processEvents()  # Allow UI to update
+            
+            # Run the export in a separate thread to avoid freezing UI
+            class ExportThread(QThread):
+                finished = pyqtSignal(bool, str)
+                progress = pyqtSignal(float)
+                
+                def __init__(self, file_path, heatmap_data, params):
+                    super().__init__()
+                    self.file_path = file_path
+                    self.heatmap_data = heatmap_data
+                    self.params = params
+                
+                def run(self):
+                    try:
+                        from utils.visualization import save_scientific_visualization
+                        save_scientific_visualization(
+                            self.file_path,
+                            self.heatmap_data,
+                            self.params['max_range'],
+                            self.params['target_distance'],
+                            self.params['circle_distance'],
+                            self.params['circle_radius'],
+                            self.params['circle_interval'],
+                            self.params['config_name'],
+                            self.params['noise_floor'],
+                            self.params['smoothing_sigma'],
+                            self.params['colormap'],
+                            self.params['visualization_mode'],
+                            progress_callback=lambda p: self.progress.emit(p)
+                        )
+                        self.finished.emit(True, self.file_path)
+                    except Exception as e:
+                        print(f"Error in export thread: {e}")
+                        self.finished.emit(False, str(e))
+            
+            # Prepare parameters for the export thread
+            export_params = {
+                'max_range': self.analyzer.params.max_range,
+                'target_distance': self.analyzer.params.target_distance,
+                'circle_distance': self.analyzer.params.circle_distance,
+                'circle_radius': self.analyzer.params.circle_radius,
+                'circle_interval': self.analyzer.params.circle_interval,
+                'config_name': config_name,
+                'noise_floor': noise_floor,
+                'smoothing_sigma': smoothing_sigma,
+                'colormap': colormap,
+                'visualization_mode': visualization_mode
+            }
+            
+            # Create and start the export thread
+            self.export_thread = ExportThread(file_path, heatmap_data_copy, export_params)
+            
+            # Connect signals
+            self.export_thread.progress.connect(progress_callback)
+            self.export_thread.finished.connect(self.on_export_completed)
+            
+            # Store file path for later use
+            self.current_export_path = file_path
+            
+            # Start the thread
+            self.export_thread.start()
+            
+        except Exception as e:
+            self.status_bar.showMessage(f"Error exporting plot: {str(e)}")
+            QMessageBox.critical(self, "Export Error", f"Failed to export plot: {str(e)}")
+            
+            # Ensure UI is unlocked in case of error
+            if hasattr(self.control_panel, 'state_manager'):
+                self.control_panel.state_manager.transition('unlock_ui')
+    
+    def on_export_completed(self, success, result):
+        """
+        Handle completion of the export thread.
+        
+        Args:
+            success: Whether the export was successful
+            result: File path if successful, error message if not
+        """
+        # Unlock the UI
+        if hasattr(self.control_panel, 'state_manager'):
+            self.control_panel.state_manager.transition('unlock_ui')
+        
+        if success:
+            file_path = result
+            self.status_bar.showMessage(f"Plot exported to: {file_path}")
             
             # Ask if user wants to view the saved file
             reply = QMessageBox.question(
@@ -700,28 +886,43 @@ class MainWindow(QMainWindow):
                 # Open file with default system application
                 import subprocess
                 import sys
-                if sys.platform == 'win32':
-                    os.startfile(file_path)
-                elif sys.platform == 'darwin':  # macOS
-                    subprocess.call(['open', file_path])
-                else:  # Linux
-                    subprocess.call(['xdg-open', file_path])
-        
-        except Exception as e:
-            self.status_bar.showMessage(f"Error exporting plot: {str(e)}")
-            QMessageBox.critical(self, "Export Error", f"Failed to export plot: {str(e)}")
+                try:
+                    if sys.platform == 'win32':
+                        os.startfile(file_path)
+                    elif sys.platform == 'darwin':  # macOS
+                        subprocess.call(['open', file_path])
+                    else:  # Linux
+                        subprocess.call(['xdg-open', file_path])
+                except Exception as e:
+                    QMessageBox.warning(
+                        self, 
+                        "Open Error", 
+                        f"Could not open the exported file: {str(e)}"
+                    )
+        else:
+            error_message = result
+            self.status_bar.showMessage(f"Error exporting plot: {error_message}")
+            QMessageBox.critical(self, "Export Error", f"Failed to export plot: {error_message}")
     
     @pyqtSlot()
     def generate_report(self):
         """Generate a report of collected radar data automatically without UI interactions."""
         if self.analyzer is None:
             self.status_bar.showMessage("No analyzer instance available")
+            if hasattr(self.control_panel, 'on_report_completed'):
+                self.control_panel.on_report_completed(success=False)
             return
         
         if not self.analyzer.config_results:
             self.status_bar.showMessage("No configuration results available for report")
             QMessageBox.information(self, "No Data", "No configuration results available for report")
+            if hasattr(self.control_panel, 'on_report_completed'):
+                self.control_panel.on_report_completed(success=False)
             return
+        
+        # Lock the UI during report generation
+        if hasattr(self.control_panel, 'state_manager'):
+            self.control_panel.state_manager.transition('lock_ui')
         
         try:
             # Automatically create report directory if it doesn't exist
@@ -739,8 +940,16 @@ class MainWindow(QMainWindow):
             # Generate the report without user interaction
             success = self.generate_custom_report(file_path)
             
+            # Unlock UI after completion
+            if hasattr(self.control_panel, 'state_manager'):
+                self.control_panel.state_manager.transition('unlock_ui')
+            
             if success:
                 self.status_bar.showMessage(f"Report generated: {os.path.basename(file_path)}")
+                
+                # Notify the control panel that report generation is complete
+                if hasattr(self.control_panel, 'on_report_completed'):
+                    self.control_panel.on_report_completed(success=True, report_path=file_path)
                 
                 # Automatically open the report without asking
                 try:
@@ -772,10 +981,21 @@ class MainWindow(QMainWindow):
             else:
                 self.status_bar.showMessage("Failed to generate report")
                 QMessageBox.warning(self, "Report Error", "Failed to generate report")
+                # Notify the control panel that report generation failed
+                if hasattr(self.control_panel, 'on_report_completed'):
+                    self.control_panel.on_report_completed(success=False)
         
         except Exception as e:
             self.status_bar.showMessage(f"Error generating report: {str(e)}")
             QMessageBox.critical(self, "Report Error", f"Error generating report: {str(e)}")
+            
+            # Ensure UI is unlocked in case of error
+            if hasattr(self.control_panel, 'state_manager'):
+                self.control_panel.state_manager.transition('unlock_ui')
+                
+            # Notify the control panel about the error
+            if hasattr(self.control_panel, 'on_report_completed'):
+                self.control_panel.on_report_completed(success=False)
     
     def _generate_secondary_roi_table_headers(self, circles: list) -> str:
         """
@@ -1814,3 +2034,50 @@ class MainWindow(QMainWindow):
                 event.ignore()
         else:
             event.accept()
+    
+    @pyqtSlot(float, float, int)
+    def configure_heatmap_update_params(self, min_time_interval, max_time_interval, threshold_percent):
+        """
+        Configure heatmap update parameters for performance optimization.
+        
+        Args:
+            min_time_interval: Minimum time between updates (seconds)
+            max_time_interval: Maximum time between updates (seconds)
+            threshold_percent: Data change threshold percentage to trigger update
+        """
+        if hasattr(self.heatmap_view, 'optimizer'):
+            self.heatmap_view.optimizer.configure(
+                min_time_interval=min_time_interval,
+                max_time_interval=max_time_interval,
+                change_threshold_percent=threshold_percent
+            )
+            self.status_bar.showMessage(
+                f"Visualization performance set to: {min_time_interval}s min, "
+                f"{max_time_interval}s max, {threshold_percent}% threshold", 
+                3000
+            )
+    
+    @pyqtSlot()
+    def optimize_visualization_pipeline(self):
+        """
+        Automatically optimize the visualization pipeline based on system performance.
+        Analyzes current CPU load and adjusts heatmap update parameters accordingly.
+        """
+        import psutil
+        
+        # Get current CPU usage
+        cpu_percent = psutil.cpu_percent(interval=0.5)
+        
+        # Determine appropriate settings based on CPU load
+        if cpu_percent < 30:
+            # Low CPU load, can use higher quality settings
+            self.configure_heatmap_update_params(0.1, 0.5, 30)
+            self.status_bar.showMessage("Auto-optimized for high performance", 3000)
+        elif cpu_percent < 60:
+            # Medium CPU load, use balanced settings
+            self.configure_heatmap_update_params(0.2, 0.7, 20)
+            self.status_bar.showMessage("Auto-optimized for balanced performance", 3000)
+        else:
+            # High CPU load, use performance-focused settings
+            self.configure_heatmap_update_params(0.3, 1.0, 15)
+            self.status_bar.showMessage("Auto-optimized for system performance", 3000)

@@ -56,6 +56,12 @@ def play_rosbag(analyzer, bag_path: str, loop: bool = True) -> None:
         if analyzer.is_recording or analyzer.is_playing:
             stop_rosbag(analyzer)
     
+    # Clear experiment data to prevent accumulation from previous runs
+    with analyzer.data_lock:
+        if hasattr(analyzer, 'experiment_data'):
+            analyzer.experiment_data.clear()
+            analyzer.get_logger().info("Cleared experiment data for new bag playback")
+            
     # Set visibility to true for data collection purposes
     analyzer.visible = True
             
@@ -248,137 +254,27 @@ def stop_rosbag(analyzer) -> None:
                 pass
     except Exception as e:
         analyzer.get_logger().error(f"Error killing residual ROS2 bag processes: {str(e)}")
-        cleanup_success = False
-    
-    # 3. Reset subscriptions to clear any queued messages
-    try:
-        # Destroy existing subscriptions
-        if hasattr(analyzer, 'pcl_subscription'):
-            analyzer.destroy_subscription(analyzer.pcl_subscription)
-        if hasattr(analyzer, 'track_array_subscription'):
-            analyzer.destroy_subscription(analyzer.track_array_subscription)
-        if hasattr(analyzer, 'occupancy_subscription'):
-            analyzer.destroy_subscription(analyzer.occupancy_subscription)
         
-        # Recreate subscriptions with the same reliable QoS profile
-        analyzer.pcl_subscription = analyzer.create_subscription(
-            PointCloud2, 
-            '/ti_mmwave/radar_scan_pcl', 
-            analyzer.pcl_callback, 
-            analyzer.reliable_qos
-        )
-        analyzer.track_array_subscription = analyzer.create_subscription(
-            MarkerArray, 
-            '/ti_mmwave/radar_track_marker_array', 
-            analyzer.track_array_callback, 
-            analyzer.reliable_qos
-        )
-        analyzer.occupancy_subscription = analyzer.create_subscription(
-            Bool, 
-            '/ti_mmwave/radar_occupancy', 
-            analyzer.occupancy_callback, 
-            analyzer.reliable_qos
-        )
-        analyzer.get_logger().info("Reset all subscriptions to clear message queues")
-    except Exception as e:
-        analyzer.get_logger().error(f"Error resetting subscriptions: {str(e)}")
-        cleanup_success = False
-    
-    # 4. Perform hard reset of PCL data
+    # Clear circle ROI data to prevent stale data in visualization
     try:
-        # Clear hard reset first
-        analyzer.hard_reset_pcl()
+        with analyzer.data_lock:
+            # Clear current frame data
+            analyzer.current_data['circle_x'] = np.array([], dtype=np.float32)
+            analyzer.current_data['circle_y'] = np.array([], dtype=np.float32)
+            analyzer.current_data['circle_intensities'] = np.array([], dtype=np.float32)
+            analyzer.current_data['circle_indices'] = np.array([], dtype=np.int32)
+            
+            # Clear additional circles if they exist
+            for i in range(1, len(analyzer.params.circles) if hasattr(analyzer.params, 'circles') else 0):
+                circle_key = f'circle{i+1}'
+                analyzer.current_data[f'{circle_key}_x'] = np.array([], dtype=np.float32)
+                analyzer.current_data[f'{circle_key}_y'] = np.array([], dtype=np.float32)
+                analyzer.current_data[f'{circle_key}_intensities'] = np.array([], dtype=np.float32)
+                analyzer.current_data[f'{circle_key}_indices'] = np.array([], dtype=np.int32)
+    except Exception as e:
+        analyzer.get_logger().error(f"Error clearing circle ROI data: {str(e)}")
         
-        # Force a UI update to show the cleared data
-        try:
-            # Make sure visualization knows about the reset
-            if hasattr(analyzer, 'signals') and hasattr(analyzer.signals, 'data_reset_signal'):
-                analyzer.signals.data_reset_signal.emit()
-                analyzer.get_logger().info("Emitted data reset signal to UI")
-        except Exception as e:
-            analyzer.get_logger().error(f"Error emitting data reset signal: {str(e)}")
-    except Exception as e:
-        analyzer.get_logger().error(f"Error during PCL hard reset: {str(e)}")
-        cleanup_success = False
-    
-    # 5. Stop data collection if it was active
-    if analyzer.collecting_data:
-        try:
-            analyzer.stop_data_collection()
-        except Exception as e:
-            analyzer.get_logger().error(f"Error stopping data collection: {str(e)}")
-            cleanup_success = False
-    
-    # 6. Reset all state variables and clear any remaining data
-    analyzer.current_bag_path = None
-    analyzer.bag_start_time = None
-    analyzer.pcl_msg_count = 0
-    analyzer.last_pcl_msg_time = None
-    analyzer.bag_duration = 0.0  # Reset bag duration
-    analyzer.last_position = -1.0  # Reset last position
-    analyzer.last_position_update_time = 0  # Reset last position update time
-    
-    # 7. Clear any remaining ROS2 topics
-    try:
-        # Use ros2 topic command to clear any remaining messages
-        subprocess.run(['ros2', 'topic', 'echo', '/ti_mmwave/radar_scan_pcl', '--once'], 
-                     capture_output=True, timeout=1.0)
-        subprocess.run(['ros2', 'topic', 'echo', '/ti_mmwave/radar_track_marker_array', '--once'], 
-                     capture_output=True, timeout=1.0)
-        subprocess.run(['ros2', 'topic', 'echo', '/ti_mmwave/radar_occupancy', '--once'], 
-                     capture_output=True, timeout=1.0)
-    except Exception as e:
-        analyzer.get_logger().debug(f"Error clearing ROS2 topics: {str(e)}")
-    
-    # 8. Update the UI to reflect the reset
-    try:
-        # Force a visualization update to clear the displays
-        if hasattr(analyzer, 'viz_components') and analyzer.viz_components.get('fig') is not None:
-            for key in ['scatter', 'circle_scatter']:
-                if analyzer.viz_components.get(key) is not None:
-                    analyzer.viz_components[key].set_offsets(np.empty((0, 2)))
-                    if hasattr(analyzer.viz_components[key], 'set_array'):
-                        analyzer.viz_components[key].set_array(np.array([]))
-            
-            # Clear text displays
-            for key in ['stats_text', 'circle_stats_text']:
-                if analyzer.viz_components.get(key) is not None:
-                    analyzer.viz_components[key].set_text("")
-            
-            # Reset heatmap if it exists
-            if hasattr(analyzer, 'heatmap_viz') and analyzer.heatmap_viz.get('heatmap') is not None:
-                grid_size = hasattr(analyzer, 'params') and hasattr(analyzer.params, 'heatmap_resolution')
-                if grid_size:
-                    empty_grid = np.zeros_like(analyzer.heatmap_viz['heatmap'].get_array())
-                    analyzer.heatmap_viz['heatmap'].set_data(empty_grid)
-                
-                # Clear contours if they exist
-                if analyzer.heatmap_viz.get('contour') is not None:
-                    for coll in analyzer.heatmap_viz['contour'].collections:
-                        try:
-                            coll.remove()
-                        except Exception:
-                            pass
-                    analyzer.heatmap_viz['contour'] = None
-                
-                # Reset SNR text
-                if analyzer.heatmap_viz.get('snr_text') is not None:
-                    analyzer.heatmap_viz['snr_text'].set_text("SNR: N/A")
-            
-            # Draw the changes
-            try:
-                if hasattr(analyzer.viz_components['fig'], 'canvas'):
-                    analyzer.viz_components['fig'].canvas.draw_idle()
-            except Exception as e:
-                analyzer.get_logger().error(f"Error updating visualization: {str(e)}")
-    except Exception as e:
-        analyzer.get_logger().error(f"Error updating UI after reset: {str(e)}")
-        cleanup_success = False
-    
-    if cleanup_success:
-        analyzer.get_logger().info("Successfully stopped ROS2 bag and completely reset analyzer state")
-    else:
-        analyzer.get_logger().warn("Stopped ROS2 bag with some cleanup errors - analyzer reset may be incomplete")
+    analyzer.get_logger().info("ROS2 bag stopped and data cleared")
 
 
 def seek_rosbag(analyzer, position: float) -> None:
@@ -400,6 +296,27 @@ def seek_rosbag(analyzer, position: float) -> None:
     position = max(0.0, min(1.0, position))
     
     try:
+        # Clear circle ROI data before seeking to prevent stale data
+        try:
+            with analyzer.data_lock:
+                # Clear current frame data
+                analyzer.current_data['circle_x'] = np.array([], dtype=np.float32)
+                analyzer.current_data['circle_y'] = np.array([], dtype=np.float32)
+                analyzer.current_data['circle_intensities'] = np.array([], dtype=np.float32)
+                analyzer.current_data['circle_indices'] = np.array([], dtype=np.int32)
+                
+                # Clear additional circles if they exist
+                for i in range(1, len(analyzer.params.circles) if hasattr(analyzer.params, 'circles') else 0):
+                    circle_key = f'circle{i+1}'
+                    analyzer.current_data[f'{circle_key}_x'] = np.array([], dtype=np.float32)
+                    analyzer.current_data[f'{circle_key}_y'] = np.array([], dtype=np.float32)
+                    analyzer.current_data[f'{circle_key}_intensities'] = np.array([], dtype=np.float32)
+                    analyzer.current_data[f'{circle_key}_indices'] = np.array([], dtype=np.int32)
+                    
+            analyzer.get_logger().info("Cleared circle ROI data before seeking")
+        except Exception as e:
+            analyzer.get_logger().error(f"Error clearing circle ROI data before seeking: {str(e)}")
+            
         # If we already know the bag duration, we don't need to query it again
         duration = getattr(analyzer, 'bag_duration', None)
         if duration is None or duration <= 0:

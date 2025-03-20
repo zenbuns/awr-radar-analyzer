@@ -19,6 +19,7 @@ from PyQt5.QtWidgets import QWidget, QVBoxLayout, QSizePolicy
 from PyQt5.QtCore import pyqtSignal
 
 from .styles import Colors
+from .heatmap_optimizer import HeatmapOptimizer
 
 
 class HeatmapView(QWidget):
@@ -64,6 +65,9 @@ class HeatmapView(QWidget):
         self.figure = None
         self.ax = None
         self.components = {}
+        
+        # Initialize the heatmap optimizer for performance improvements
+        self.optimizer = HeatmapOptimizer()
         
         # Set up the UI
         self.setup_ui()
@@ -294,14 +298,19 @@ class HeatmapView(QWidget):
         Args:
             heatmap_data: New 2D numpy array of heatmap data.
         """
+        # Store the newest data regardless of whether we update the display
         self.heatmap_data = heatmap_data
+        
+        # Use optimizer to determine if we should update the visualization
+        if not self.optimizer.should_update_heatmap(heatmap_data):
+            return
         
         # Apply noise floor threshold
         data_thresholded = heatmap_data.copy()
         data_thresholded[data_thresholded < self.noise_floor] = 0
         
-        # Update display based on visualization mode
-        self._update_visualization_mode(data_thresholded)
+        # Update display based on visualization mode - pass optimizer state for contour decisions
+        self._update_visualization_mode(data_thresholded, redraw=self.optimizer.should_redraw())
         
         # Update SNR with formatting improvements
         if np.max(data_thresholded) > 0:
@@ -310,8 +319,10 @@ class HeatmapView(QWidget):
         else:
             self.components['snr_text'].set_text('SNR: N/A')
         
-        # Redraw canvas
-        self.canvas.draw_idle()
+        # Only redraw if necessary according to the optimizer
+        if self.optimizer.should_redraw():
+            # Use draw_idle which is more efficient than full draw
+            self.canvas.draw_idle()
     
     def _update_visualization_mode(self, data, redraw=True):
         """
@@ -342,6 +353,9 @@ class HeatmapView(QWidget):
                 self.components['norm'] = norm
                 self.components['heatmap'].set_norm(norm)
             
+            # Always update the heatmap data which is relatively fast
+            self.components['heatmap'].set_data(data)
+            
             # Clear existing contours
             if self.components['contour'] is not None:
                 for coll in self.components['contour'].collections:
@@ -351,86 +365,78 @@ class HeatmapView(QWidget):
                         pass
                 self.components['contour'] = None
             
-            # Apply visualization mode with improved styling
-            if self.visualization_mode == 'heatmap':
-                self.components['heatmap'].set_alpha(0.85)
-                self.components['heatmap'].set_data(data)
+            # Only update contours if the visualization mode requires it and the optimizer allows it
+            if self.visualization_mode in ['contour', 'combined'] and self.optimizer.should_update_contours():
+                # Only generate contours if we have enough data
+                nonzero_count = np.count_nonzero(data)
+                if nonzero_count > 20:  # Skip if too few points
+                    levels = np.linspace(self.noise_floor, np.max(data), 6)
+                    # Create contours only if we have valid levels
+                    if levels.size > 1 and levels[-1] > levels[0]:
+                        self.components['contour'] = self.ax.contour(
+                            data,
+                            levels=levels,
+                            extent=[-self.max_range, self.max_range, -self.max_range, self.max_range],
+                            colors='white' if self.visualization_mode == 'combined' else 'black',
+                            alpha=0.5,
+                            linewidths=0.5
+                        )
             
-            elif self.visualization_mode == 'contour':
-                from scipy.ndimage import gaussian_filter
-                
-                self.components['heatmap'].set_alpha(0.2)
-                self.components['heatmap'].set_data(data)
-                
-                if np.max(data) > 0:
-                    smoothed_data = gaussian_filter(data, sigma=2.0)
-                    levels = np.linspace(self.noise_floor, np.max(smoothed_data), 8)
-                    
-                    extent = [
-                        -self.max_range,
-                        self.max_range,
-                        0,
-                        2 * self.max_range
-                    ]
-                    x_grid = np.linspace(extent[0], extent[1], smoothed_data.shape[1])
-                    y_grid = np.linspace(extent[2], extent[3], smoothed_data.shape[0])
-                    
-                    self.components['contour'] = self.ax.contourf(
-                        x_grid, y_grid, smoothed_data,
-                        levels=levels, cmap=self.current_colormap,
-                        alpha=0.8  # Increased from 0.7 for better visibility
-                    )
-                    self.ax.contour(
-                        x_grid, y_grid, smoothed_data,
-                        levels=levels, colors=Colors.TEXT,
-                        alpha=0.5, linewidths=0.6
-                    )
+            # Set visibility of heatmap based on mode
+            self.components['heatmap'].set_visible(self.visualization_mode in ['heatmap', 'combined'])
             
-            elif self.visualization_mode == 'combined':
-                from scipy.ndimage import gaussian_filter
-                
-                self.components['heatmap'].set_alpha(0.6)
-                self.components['heatmap'].set_data(data)
-                
-                if np.max(data) > 0:
-                    smoothed_data = gaussian_filter(data, sigma=2.0)
-                    levels = np.linspace(self.noise_floor, np.max(smoothed_data), 6)
-                    
-                    extent = [
-                        -self.max_range,
-                        self.max_range,
-                        0,
-                        2 * self.max_range
-                    ]
-                    x_grid = np.linspace(extent[0], extent[1], smoothed_data.shape[1])
-                    y_grid = np.linspace(extent[2], extent[3], smoothed_data.shape[0])
-                    
-                    self.components['contour'] = self.ax.contour(
-                        x_grid, y_grid, smoothed_data,
-                        levels=levels, colors=Colors.TEXT,
-                        alpha=0.7, linewidths=0.9  # Improved visibility
-                    )
-            
-            if redraw:
-                self.canvas.draw_idle()
-        
         except Exception as e:
-            print(f"Error updating visualization mode: {str(e)}")
+            print(f"Error updating visualization: {e}")
     
     def set_visualization_mode(self, mode):
         """
-        Set the visualization mode and update the display.
+        Set the visualization mode.
         
         Args:
-            mode: One of 'heatmap', 'contour', or 'combined'.
+            mode: Visualization mode ('heatmap', 'contour', or 'combined').
         """
         if mode in ['heatmap', 'contour', 'combined']:
             self.visualization_mode = mode
             
+            # Adjust optimizer settings based on visualization mode
+            if mode == 'heatmap':
+                # Fastest updates for heatmap-only mode
+                self.optimizer.set_update_interval(0.05)
+                self.optimizer.set_max_fps(30)
+            elif mode == 'contour':
+                # More conservative settings for contour mode which is CPU intensive
+                self.optimizer.set_update_interval(0.2)
+                self.optimizer.set_contour_interval(0.5)
+                self.optimizer.set_max_fps(15)
+            else:  # combined
+                # Balanced settings for combined mode
+                self.optimizer.set_update_interval(0.1)
+                self.optimizer.set_contour_interval(0.5)
+                self.optimizer.set_max_fps(20)
+                
+            # Update display with current data if available
             if self.heatmap_data is not None:
                 data_thresholded = self.heatmap_data.copy()
                 data_thresholded[data_thresholded < self.noise_floor] = 0
-                self._update_visualization_mode(data_thresholded)
+                self._update_visualization_mode(data_thresholded, True)
+    
+    def configure_optimizer(self, update_interval=None, contour_interval=None, max_fps=None):
+        """
+        Configure the heatmap optimizer settings.
+        
+        Args:
+            update_interval: Time in seconds between heatmap updates.
+            contour_interval: Time in seconds between contour updates.
+            max_fps: Maximum frames per second for redrawing.
+        """
+        if update_interval is not None:
+            self.optimizer.set_update_interval(update_interval)
+        
+        if contour_interval is not None:
+            self.optimizer.set_contour_interval(contour_interval)
+            
+        if max_fps is not None:
+            self.optimizer.set_max_fps(max_fps)
     
     def set_colormap(self, colormap):
         """
@@ -697,22 +703,24 @@ class HeatmapView(QWidget):
             return None
     
     def reset_heatmap(self):
-        """Reset the heatmap data to zeros."""
-        if self.heatmap_data is not None:
-            self.heatmap_data = np.zeros_like(self.heatmap_data)
-            self.components['heatmap'].set_data(self.heatmap_data)
-            self.components['snr_text'].set_text('SNR: N/A')
+        """Reset the heatmap to initial state."""
+        grid_size = int(2 * self.max_range / 0.5)
+        # Ensure grid size is even for better memory alignment
+        if grid_size % 2 == 1:
+            grid_size += 1
             
-            # Clear contours
-            if self.components['contour'] is not None:
-                for coll in self.components['contour'].collections:
-                    try:
-                        coll.remove()
-                    except Exception:
-                        pass
-                self.components['contour'] = None
-            
-            self.canvas.draw_idle()
+        # Create clean heatmap data
+        self.heatmap_data = np.zeros((grid_size, grid_size), dtype=np.float32)
+        
+        # Update the display
+        self.update_heatmap_data(self.heatmap_data)
+        
+        # Reset optimizer state
+        if hasattr(self, 'optimizer'):
+            self.optimizer.last_update_time = 0
+            self.optimizer.last_contour_time = 0
+            self.optimizer.last_data_hash = None
+            self.optimizer.frame_counter = 0
     
     def compute_metrics(self):
         """

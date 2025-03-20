@@ -8,7 +8,7 @@ experiment:
   current_config: "default_config"  # Default configuration name
   target_distance: 5.0      # Default target distance for experiments in meters
   circle_distance: 5.0      # Default distance to center of sampling circle in meters
-  circle_radius: 0.5        # Default radius of the sampling circle in meters
+  circle_radius: 1.0        # Default radius of the sampling circle in meters (increased from 0.5m)
   heatmap_resolution: 0.5   # Resolution of the heatmap grid in meters per cell
   num_trials: 1             # Default number of trials per experiment
 

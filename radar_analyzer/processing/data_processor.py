@@ -41,7 +41,7 @@ def filter_points_in_circle(
     Filter current points to find those within all enabled sampling circles.
     
     This method efficiently identifies points within each enabled sampling circle
-    using vectorized operations.
+    using vectorized operations and categorizes them by distance bands.
 
     Args:
         analyzer: RadarPointCloudAnalyzer instance.
@@ -56,6 +56,8 @@ def filter_points_in_circle(
             analyzer.current_data['circle_y'] = np.array([], dtype=np.float32)
             analyzer.current_data['circle_intensities'] = np.array([], dtype=np.float32)
             analyzer.current_data['circle_indices'] = np.array([], dtype=np.int32)
+            analyzer.current_data['circle_distances'] = np.array([], dtype=np.float32)
+            analyzer.current_data['circle_distance_bands'] = {}
             
             # Initialize empty arrays for all circles
             for i in range(len(analyzer.params.circles)):
@@ -64,6 +66,8 @@ def filter_points_in_circle(
                 analyzer.current_data[f'{circle_key}_y'] = np.array([], dtype=np.float32)
                 analyzer.current_data[f'{circle_key}_intensities'] = np.array([], dtype=np.float32)
                 analyzer.current_data[f'{circle_key}_indices'] = np.array([], dtype=np.int32)
+                analyzer.current_data[f'{circle_key}_distances'] = np.array([], dtype=np.float32)
+                analyzer.current_data[f'{circle_key}_distance_bands'] = {}
             return
         
         analyzer.get_logger().debug(f"Processing points for {len(analyzer.params.circles)} circles, total input points: {len(x)}")
@@ -77,6 +81,8 @@ def filter_points_in_circle(
                 analyzer.current_data[f'{circle_key}_y'] = np.array([], dtype=np.float32)
                 analyzer.current_data[f'{circle_key}_intensities'] = np.array([], dtype=np.float32)
                 analyzer.current_data[f'{circle_key}_indices'] = np.array([], dtype=np.int32)
+                analyzer.current_data[f'{circle_key}_distances'] = np.array([], dtype=np.float32)
+                analyzer.current_data[f'{circle_key}_distance_bands'] = {}
                 analyzer.get_logger().debug(f"Circle {i} ('{circle.label}') is disabled, skipping")
                 continue
                 
@@ -93,7 +99,13 @@ def filter_points_in_circle(
             dx = x - circle_center_x
             dy = y - circle_center_y
             dist_sq = dx * dx + dy * dy
-            radius_sq = circle.radius ** 2
+            
+            # Add a small tolerance factor (0.5% of radius squared) to ensure edge points are included
+            # This is especially important for larger circle sizes
+            radius_sq = (circle.radius ** 2) * 1.005  # 0.5% tolerance
+            
+            # Alternative: Add a small fixed epsilon for numerical stability
+            # radius_sq = (circle.radius ** 2) + 0.001  # Fixed small epsilon
 
             # Find points within circle
             circle_indices = np.where(dist_sq <= radius_sq)[0]
@@ -107,8 +119,60 @@ def filter_points_in_circle(
             analyzer.current_data[f'{circle_key}_intensities'] = intensities[circle_indices]
             analyzer.current_data[f'{circle_key}_indices'] = circle_indices
             
-            analyzer.get_logger().debug(f"Circle {i} ('{circle.label}'): center=({circle_center_x:.2f}, {circle_center_y:.2f}), " + 
-                                      f"radius={circle.radius:.2f}, found {len(circle_indices)} points")
+            # Calculate and store actual distances from origin for each point
+            if len(circle_indices) > 0:
+                point_distances = np.sqrt(x[circle_indices]**2 + y[circle_indices]**2)
+                analyzer.current_data[f'{circle_key}_distances'] = point_distances
+                
+                # Categorize points by distance bands (1-meter bands by default)
+                band_width = 1.0  # width of each distance band in meters
+                min_dist = max(0, int(np.floor(np.min(point_distances))))
+                max_dist = int(np.ceil(np.max(point_distances)))
+                distance_bands = {}
+                
+                for band_start in range(min_dist, max_dist + 1):
+                    band_end = band_start + band_width
+                    band_key = f"{band_start}m-{band_end}m"
+                    in_band = (point_distances >= band_start) & (point_distances < band_end)
+                    band_indices = np.where(in_band)[0]
+                    band_count = len(band_indices)
+                    
+                    if band_count > 0:
+                        distance_bands[band_key] = {
+                            'count': band_count,
+                            'indices': band_indices,
+                            'distances': point_distances[band_indices]
+                        }
+                
+                analyzer.current_data[f'{circle_key}_distance_bands'] = distance_bands
+                
+                # Generate comprehensive distance statistics for logging
+                band_counts = [f"{k}: {v['count']} pts" for k, v in distance_bands.items()]
+                bands_str = ", ".join(band_counts)
+                
+                analyzer.get_logger().debug(f"Circle {i} ('{circle.label}'): center=({circle_center_x:.2f}, {circle_center_y:.2f}), " + 
+                                          f"radius={circle.radius:.2f}, found {len(circle_indices)} points")
+                analyzer.get_logger().debug(f"Distance bands: {bands_str}")
+            else:
+                analyzer.current_data[f'{circle_key}_distances'] = np.array([], dtype=np.float32)
+                analyzer.current_data[f'{circle_key}_distance_bands'] = {}
+                analyzer.get_logger().debug(f"Circle {i} ('{circle.label}'): center=({circle_center_x:.2f}, {circle_center_y:.2f}), " + 
+                                          f"radius={circle.radius:.2f}, found 0 points")
+            
+            # Add detailed distance logging for edge cases when circle radius is large
+            if circle.radius > 1.0 and len(circle_indices) > 0:
+                # Get min and max distances of detected points
+                distances = np.sqrt(dist_sq[circle_indices])
+                min_dist = np.min(distances)
+                max_dist = np.max(distances)
+                actual_circle_radius = circle.radius
+                effective_circle_radius = np.sqrt(radius_sq)
+                
+                analyzer.get_logger().debug(f"Circle {i} distance metrics: " +
+                                         f"min_dist={min_dist:.3f}m, " +
+                                         f"max_dist={max_dist:.3f}m, " +
+                                         f"circle_radius={actual_circle_radius:.3f}m, " +
+                                         f"effective_radius_with_tolerance={effective_circle_radius:.3f}m")
             
     except Exception as e:
         analyzer.get_logger().error(f"Error filtering points in circles: {str(e)}")
@@ -117,13 +181,8 @@ def filter_points_in_circle(
         analyzer.current_data['circle_y'] = np.array([], dtype=np.float32)
         analyzer.current_data['circle_intensities'] = np.array([], dtype=np.float32)
         analyzer.current_data['circle_indices'] = np.array([], dtype=np.int32)
-        
-        # Also initialize arrays for other circles
-        for i in range(1, len(analyzer.params.circles)):
-            analyzer.current_data[f'circle{i+1}_x'] = np.array([], dtype=np.float32)
-            analyzer.current_data[f'circle{i+1}_y'] = np.array([], dtype=np.float32)
-            analyzer.current_data[f'circle{i+1}_intensities'] = np.array([], dtype=np.float32)
-            analyzer.current_data[f'circle{i+1}_indices'] = np.array([], dtype=np.int32)
+        analyzer.current_data['circle_distances'] = np.array([], dtype=np.float32)
+        analyzer.current_data['circle_distance_bands'] = {}
 
 
 def update_heatmap_vectorized(

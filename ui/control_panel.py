@@ -86,18 +86,22 @@ class ControlPanel(QWidget):
     visualize_pointcloud = pyqtSignal(str)  # Point cloud topic
     
     def __init__(self, parent=None):
+        """
+        Initialize the ControlPanel widget.
+        
+        Args:
+            parent: Parent widget (optional). If provided, this should be the main window instance.
+        """
+        super().__init__(parent)
+        
+        # Store reference to the main window
+        self.main_window = parent
+        
         # Create a folder to store application settings
         self.settings_dir = os.path.join(os.path.expanduser("~"), ".radar_analyzer")
         if not os.path.exists(self.settings_dir):
             os.makedirs(self.settings_dir, exist_ok=True)
         self.settings_file = os.path.join(self.settings_dir, "ui_settings.json")
-        """
-        Initialize the ControlPanel widget.
-        
-        Args:
-            parent: Parent widget (optional).
-        """
-        super().__init__(parent)
         
         # Initialize status bar (must be before setup_ui)
         self.status_bar = QLabel("Ready")
@@ -115,6 +119,10 @@ class ControlPanel(QWidget):
         
         # Create UI components
         self.setup_ui()
+        
+        # Initialize state manager for robust UI state management
+        from ui.state_manager import ApplicationStateManager
+        self.state_manager = ApplicationStateManager(self)
         
         # Initialize timer for progress updates
         self.progress_timer = QTimer(self)
@@ -1417,110 +1425,74 @@ class ControlPanel(QWidget):
             QTimer.singleShot(500, self._start_collection_from_bag)
     
     def play_bag_with_options(self, bag_path, loop=True):
-        """Helper method to play a bag with specific options."""
-        # Update UI
-        self.set_status(f"Playing bag: {bag_path}")
-        self.play_button.setEnabled(False)
-        self.stop_playback_button.setEnabled(True)
+        """
+        Start bag playback with the specified options and error handling.
         
-        # Use custom signal to pass the loop parameter
-        if hasattr(self, 'main_window') and hasattr(self.main_window, 'analyzer'):
-            analyzer = self.main_window.analyzer
-            if analyzer:
-                try:
-                    # Force a hard reset of PCL data before playing bag to ensure clean state
-                    if hasattr(analyzer, 'hard_reset_pcl'):
-                        print("Performing hard reset of PCL data before bag playback")
-                        analyzer.hard_reset_pcl()
-                        
-                    # Call play_rosbag directly on the analyzer with the loop parameter
-                    from radar_analyzer.utils.ros_bag_handler import play_rosbag
-                    play_rosbag(analyzer, bag_path, loop)
-                except Exception as e:
-                    self.set_status(f"Error playing bag: {str(e)}")
-                    return False
-                return True
-        
-        # Fall back to the standard signal if direct call fails
-        self.play_rosbag.emit(bag_path)
-        return True
+        Args:
+            bag_path: Path to the bag file to play
+            loop: Whether to loop playback
+            
+        Returns:
+            bool: Whether playback was started successfully
+        """
+        try:
+            # Lock UI during the operation
+            self.state_manager.transition('lock_ui')
+            
+            # Emit signal to start playback
+            self.play_rosbag.emit(bag_path)
+            
+            # Set appropriate status message
+            loop_text = "looping enabled" if loop else "no loop"
+            self.set_status(f"Playing {os.path.basename(bag_path)} ({loop_text})")
+            
+            # Update state based on result
+            self.state_manager.transition('unlock_ui')
+            return True
+        except Exception as e:
+            # Handle failure cases
+            print(f"Error starting bag playback: {e}")
+            self.set_status(f"Failed to play bag: {str(e)}")
+            
+            # Make sure UI is unlocked and reset to appropriate state
+            self.state_manager.transition('unlock_ui')
+            self.state_manager.transition('stop_playback')
+            return False
     
     def _start_collection_from_bag(self):
-        """Helper method to start data collection from bag."""
-        # Get configuration from the data collection panel
-        config_name = self.config_entry.text().strip() or "bag_playback"
+        """Start data collection when playing a bag with 'Generate from Bag' checked."""
+        # Set flag to track that bag playback was started for data generation
+        self.bag_started_for_generation = True
+        
+        # Make sure we have a main window reference
+        if not hasattr(self, 'main_window') or self.main_window is None:
+            print("Error: No main window reference available")
+            self.set_status("Error: Cannot start collection from bag")
+            return
+        
+        # Get parameters for data collection
+        config_name = self.config_entry.text().strip() or "bag_auto"
         target_distance = self.target_combo.currentText()
         
-        # Determine duration based on bag file length
-        analyzer = None
-        if self.main_window and hasattr(self.main_window, 'analyzer'):
-            analyzer = self.main_window.analyzer
-            
-            # Important: Make sure experiment_data is cleared before starting collection
-            if hasattr(analyzer, 'experiment_data') and hasattr(analyzer.experiment_data, 'clear'):
-                print("Explicitly clearing experiment data before starting collection")
-                try:
-                    # Ensure we have a data_lock to prevent race conditions
-                    if hasattr(analyzer, 'data_lock'):
-                        with analyzer.data_lock:
-                            analyzer.experiment_data.clear()
-                            print("Experiment data cleared successfully with lock")
-                            
-                            # Reset current data for circles to prevent stale data
-                            if hasattr(analyzer, 'current_data'):
-                                analyzer.current_data['circle_x'] = np.array([], dtype=np.float32)
-                                analyzer.current_data['circle_y'] = np.array([], dtype=np.float32)
-                                analyzer.current_data['circle_intensities'] = np.array([], dtype=np.float32)
-                                analyzer.current_data['circle_indices'] = np.array([], dtype=np.int32)
-                                
-                                # Also clear additional circles if they exist
-                                if hasattr(analyzer, 'params') and hasattr(analyzer.params, 'circles'):
-                                    for i in range(1, len(analyzer.params.circles)):
-                                        circle_key = f'circle{i+1}'
-                                        analyzer.current_data[f'{circle_key}_x'] = np.array([], dtype=np.float32)
-                                        analyzer.current_data[f'{circle_key}_y'] = np.array([], dtype=np.float32)
-                                        analyzer.current_data[f'{circle_key}_intensities'] = np.array([], dtype=np.float32)
-                                        analyzer.current_data[f'{circle_key}_indices'] = np.array([], dtype=np.int32)
-                                print("Circle ROI data cleared successfully")
-                    else:
-                        analyzer.experiment_data.clear()
-                        print("Warning: Experiment data cleared without lock")
-                except Exception as e:
-                    print(f"Error clearing experiment data: {e}")
-                    
-            # Ensure circle distance matches target distance
-            if analyzer and hasattr(analyzer, 'params'):
-                try:
-                    target_dist = float(target_distance)
-                    print(f"Setting circle distance to match target distance: {target_dist}")
-                    
-                    # Update primary circle distance
-                    analyzer.params.circle_distance = target_dist
-                    
-                    # Update all enabled circles
-                    if hasattr(analyzer.params, 'circles') and len(analyzer.params.circles) > 0:
-                        analyzer.params.circles[0].distance = target_dist
-                        
-                        # Update cached circle center for immediate effect
-                        if hasattr(analyzer, '_cached_circle_center'):
-                            # Calculate based on angle
-                            angle_rad = math.radians(analyzer.params.circles[0].angle)
-                            circle_center_x = target_dist * math.sin(angle_rad)
-                            circle_center_y = target_dist * math.cos(angle_rad)
-                            analyzer._cached_circle_center = np.array([circle_center_x, circle_center_y])
-                            print(f"Updated circle center to: [{circle_center_x:.2f}, {circle_center_y:.2f}]")
-                            
-                except Exception as e:
-                    print(f"Error updating circle distance: {e}")
+        # Use the state manager to update UI state
+        self.state_manager.transition('start_collection')
         
-        # Use bag duration if available, otherwise use default value
-        if analyzer and hasattr(analyzer, 'bag_duration') and analyzer.bag_duration > 0:
-            # Convert bag duration from seconds to collection duration in seconds
-            # Round up to the nearest second to ensure we capture the whole bag
-            duration = int(analyzer.bag_duration + 1)
-            self.set_status(f"Using bag duration: {duration} seconds")
+        # Try to get the bag duration for better progress reporting
+        try:
+            from PyQt5.QtCore import QDateTime
+            duration = 60  # Default duration in seconds
+            
+            if self.main_window and self.main_window.analyzer:
+                analyzer = self.main_window.analyzer
+                
+                # Try to get the duration from the bag file
+                if hasattr(analyzer, 'ros_bag_handler') and hasattr(analyzer.ros_bag_handler, 'get_bag_duration'):
+                    duration = analyzer.ros_bag_handler.get_bag_duration()
+                    self.set_status(f"Bag duration detected: {duration} seconds")
+                    print(f"Using bag duration: {duration} seconds")
+            
             print(f"Starting collection with bag duration: {duration} seconds")
-        else:
+        except Exception as e:
             # Fallback to the value in the duration spinner
             duration = int(self.duration_spin.value())
             self.set_status(f"Using default duration: {duration} seconds")
@@ -1542,38 +1514,35 @@ class ControlPanel(QWidget):
             self.set_status(f"Starting data collection from bag with config: {config_name} for {duration}s")
             self.start_collection.emit(config_name, target_distance, duration)
             
-            # Update UI to show collection is in progress
-            self.start_button.setEnabled(False)
-            self.stop_button.setEnabled(True)
-            
             # Update the progress bar and its maximum value
-            if hasattr(self, 'collection_start_time'):
-                self.collection_start_time = QDateTime.currentDateTime()
-            if hasattr(self, 'collection_duration'):
-                self.collection_duration = duration
+            from PyQt5.QtCore import QDateTime
+            self.collection_start_time = QDateTime.currentDateTime()
+            self.collection_duration = duration
             
             # Display the collection time in the UI
             if hasattr(self, 'collection_time_label'):
                 self.collection_time_label.setText(f"Time: 00:00 / {duration//60:02d}:{duration%60:02d}")
             
-            # Start the timer for progress updates if not already running
+            # Start the timer for progress updates
             if hasattr(self, 'progress_timer') and not self.progress_timer.isActive():
                 self.progress_timer.start(100)  # Update every 0.1 seconds
             
-            print(f"Data collection started: config={config_name}, target={target_distance}, duration={duration}s")
-            
             # Register for end-of-bag notification to stop collection
-            if analyzer and hasattr(analyzer, 'signals'):
+            if hasattr(self.main_window, 'analyzer') and hasattr(self.main_window.analyzer, 'signals'):
+                analyzer = self.main_window.analyzer
                 try:
                     # If possible, connect to the bag end signal using our safe helper
                     if hasattr(analyzer.signals, 'bag_playback_ended'):
                         self._safely_connect_signal(analyzer.signals.bag_playback_ended, self.on_bag_playback_ended)
                 except Exception as e:
                     print(f"Error setting up bag end signal: {e}")
-                    
+                
         except Exception as e:
-            self.set_status(f"Error starting data collection: {e}")
-            print(f"Error starting data collection: {e}")
+            print(f"Error starting collection from bag: {e}")
+            self.set_status(f"Error: {str(e)}")
+            
+            # Reset UI state on error
+            self.state_manager.transition('stop_collection')
     
     def on_bag_playback_ended(self):
         """
@@ -1703,35 +1672,83 @@ class ControlPanel(QWidget):
             parent_layout: Parent layout to add widgets to.
         """
         analysis_group = QGroupBox("Analysis Controls")
-        analysis_layout = QHBoxLayout(analysis_group)
+        analysis_layout = QVBoxLayout(analysis_group)
         
-        # Action buttons
+        # Action buttons in horizontal layout
+        buttons_layout = QHBoxLayout()
+        
         self.save_heatmap_button = QPushButton("Save Heatmap")
         self.save_heatmap_button.setIcon(QIcon("/home/zen/Pictures/Radar_stuff/icons/save.png"))
         self.save_heatmap_button.setIconSize(QSize(24, 24))
         self.save_heatmap_button.clicked.connect(lambda: self.save_heatmap.emit())
-        analysis_layout.addWidget(self.save_heatmap_button)
+        buttons_layout.addWidget(self.save_heatmap_button)
         
         self.export_plot_button = QPushButton("Export Plot")
         self.export_plot_button.setIcon(QIcon("/home/zen/Pictures/Radar_stuff/icons/export.png"))
         self.export_plot_button.setIconSize(QSize(24, 24))
-        self.export_plot_button.clicked.connect(lambda: self.export_plot.emit())
-        analysis_layout.addWidget(self.export_plot_button)
+        self.export_plot_button.clicked.connect(self.on_export_plot)
+        buttons_layout.addWidget(self.export_plot_button)
         
         self.add_roi_button = QPushButton("Add ROI")
         self.add_roi_button.setIcon(QIcon("/home/zen/Pictures/Radar_stuff/icons/add_roi.png"))
         self.add_roi_button.setIconSize(QSize(24, 24))
         self.add_roi_button.clicked.connect(lambda: self.add_roi.emit())
-        analysis_layout.addWidget(self.add_roi_button)
+        buttons_layout.addWidget(self.add_roi_button)
         
         self.clear_rois_button = QPushButton("Clear ROIs")
         self.clear_rois_button.setIcon(QIcon("/home/zen/Pictures/Radar_stuff/icons/clear.png"))
         self.clear_rois_button.setIconSize(QSize(24, 24))
         self.clear_rois_button.clicked.connect(lambda: self.clear_rois.emit())
-        analysis_layout.addWidget(self.clear_rois_button)
+        buttons_layout.addWidget(self.clear_rois_button)
+        
+        analysis_layout.addLayout(buttons_layout)
+        
+        # Generate report button
+        button_style = """
+            QPushButton {
+                background-color: #0D47A1;
+                border: none;
+                border-radius: 4px;
+                padding: 8px 16px;
+                font-weight: bold;
+                color: white;
+            }
+            QPushButton:hover {
+                background-color: #1565C0;
+            }
+            QPushButton:pressed {
+                background-color: #0A2C6B;
+            }
+            QPushButton:disabled {
+                background-color: #424242;
+                color: #757575;
+            }
+        """
+        
+        report_layout = QHBoxLayout()
+        self.report_button = QPushButton("Generate Report")
+        self.report_button.setIcon(QIcon("/home/zen/Pictures/Radar_stuff/icons/report.png"))
+        self.report_button.setIconSize(QSize(24, 24))
+        self.report_button.setCursor(Qt.PointingHandCursor)
+        self.report_button.setStyleSheet(button_style)
+        
+        # Assign the button to generate_report_button for state manager compatibility
+        self.generate_report_button = self.report_button
+        
+        self.report_button.clicked.connect(self.on_generate_report)
+        report_layout.addWidget(self.report_button)
+        analysis_layout.addLayout(report_layout)
         
         # Analysis metrics display
+        metrics_header = QLabel("Analysis Metrics")
+        metrics_header.setStyleSheet("font-weight: bold;")
+        analysis_layout.addWidget(metrics_header)
+        
         self.metrics_label = QLabel("No analysis data available")
+        self.metrics_label.setStyleSheet("padding: 10px; background-color: rgba(30, 30, 30, 0.5); border-radius: 5px;")
+        self.metrics_label.setWordWrap(True)
+        self.metrics_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.metrics_label.setMinimumHeight(80)
         analysis_layout.addWidget(self.metrics_label)
         
         # Add to parent layout
@@ -1804,9 +1821,11 @@ class ControlPanel(QWidget):
         target_distance = self.target_combo.currentText()
         duration = self.duration_spin.value()
         
+        # Use state manager to handle UI updates
+        self.state_manager.transition('start_collection')
+        
+        # Emit signal to start collection
         self.start_collection.emit(config_name, target_distance, duration)
-        self.start_button.setEnabled(False)
-        self.stop_button.setEnabled(True)
         
         # Reset all collection stats
         self.progress_bar.setValue(0)
@@ -1835,8 +1854,10 @@ class ControlPanel(QWidget):
     def on_stop_collection(self):
         """Handle stop collection button click."""
         self.stop_collection.emit()
-        self.start_button.setEnabled(True)
-        self.stop_button.setEnabled(False)
+        
+        # Use state manager to handle UI updates
+        self.state_manager.transition('stop_collection')
+        
         self.progress_timer.stop()
         
         # Update UI to indicate collection stopped
@@ -1883,7 +1904,7 @@ class ControlPanel(QWidget):
         seconds = int(elapsed) % 60
         self.collection_time_label.setText(f"Time: {minutes:02d}:{seconds:02d}")
         
-        # Get the actual points count from the analyzer - ONLY trust actual data with thread safety
+        # Thread-safe access to point count
         display_text = None  # Only set if value changes
         points = -1  # Invalid value to detect if it was set
         target_band_points = -1  # Count points at the target distance band
@@ -1891,35 +1912,36 @@ class ControlPanel(QWidget):
         
         try:
             # Use the direct reference to the main window
-            if hasattr(self, 'main_window') and hasattr(self.main_window, 'analyzer') and self.main_window.analyzer:
-                analyzer = self.main_window.analyzer
+            analyzer = getattr(self, 'main_window', None)
+            if analyzer:
+                analyzer = getattr(analyzer, 'analyzer', None)
                 
-                # Only attempt to access experiment_data with proper data locking
-                if hasattr(analyzer, 'data_lock'):
-                    # Use a separate variable to track if we got points safely
-                    with analyzer.data_lock:
-                        # Get total points count
-                        if hasattr(analyzer, 'experiment_data') and hasattr(analyzer.experiment_data, 'x_points'):
-                            points = len(analyzer.experiment_data.x_points)
+            if analyzer and hasattr(analyzer, 'data_lock'):
+                # Use the analyzer's data lock for thread safety
+                with analyzer.data_lock:
+                    # Get total points count
+                    if hasattr(analyzer, 'experiment_data') and hasattr(analyzer.experiment_data, 'x_points'):
+                        points = len(analyzer.experiment_data.x_points)
+                        
+                        # Get distance band information if available in metadata
+                        if hasattr(analyzer.experiment_data, 'metadata'):
+                            metadata = getattr(analyzer.experiment_data, 'metadata', {})
+                            if 'distance_bands' in metadata:
+                                distance_bands = metadata.get('distance_bands', {})
+                                target_band = metadata.get('target_band', '')
+                                target_band_points = metadata.get('target_band_count', 0)
+                        
+                        # Only access current_data inside the lock
+                        if hasattr(analyzer, 'current_data'):
+                            circle_points = len(analyzer.current_data.get('circle_x', []))
+                            current_bands = analyzer.current_data.get('circle_distance_bands', {})
                             
-                            # Get distance band information if available in metadata
-                            if hasattr(analyzer.experiment_data, 'metadata'):
-                                metadata = getattr(analyzer.experiment_data, 'metadata', {})
-                                if 'distance_bands' in metadata:
-                                    distance_bands = metadata.get('distance_bands', {})
-                                    target_band = metadata.get('target_band', '')
-                                    target_band_points = metadata.get('target_band_count', 0)
-                            
-                            # Add debug logging to track current circle points
-                            if hasattr(analyzer, 'current_data'):
-                                circle_points = len(analyzer.current_data.get('circle_x', []))
-                                current_bands = analyzer.current_data.get('circle_distance_bands', {})
+                            if current_bands:
+                                band_str = ", ".join([f"{k}: {v['count']}" for k, v in current_bands.items()])
+                                print(f"DEBUG - Current frame bands: {band_str}")
                                 
-                                if current_bands:
-                                    band_str = ", ".join([f"{k}: {v['count']}" for k, v in current_bands.items()])
-                                    print(f"DEBUG - Current frame bands: {band_str}")
-                                    
-                                # Get target distance and corresponding band
+                            # Get target distance and corresponding band
+                            if hasattr(analyzer, 'params'):
                                 target_dist = analyzer.params.target_distance
                                 target_band_width = 1.0  # 1-meter bands
                                 target_band_start = int(np.floor(target_dist))
@@ -1934,11 +1956,8 @@ class ControlPanel(QWidget):
                                       f"Target band ({target_band_key}): {target_band_current}, " +
                                       f"Total accumulated points: {points}, " +
                                       f"Progress: {progress}%")
-                else:
-                    # Log a warning but DON'T try to access experiment_data without a lock
-                    print("WARNING: No data_lock available for thread safety! Cannot reliably read point count.")
             else:
-                print("No analyzer available, can't get point count")
+                print("WARNING: No data_lock available for thread safety! Cannot reliably read point count.")
         except Exception as e:
             print(f"Error getting point count: {e}")
         
@@ -1950,8 +1969,12 @@ class ControlPanel(QWidget):
             # Every 10th update or when count changes
             if points != self.last_point_count or self.point_update_counter >= 10:
                 # Show total point count and target band points if available
-                if target_band_points > 0:
-                    target_dist = self.main_window.analyzer.params.target_distance
+                if target_band_points > 0 and analyzer:
+                    try:
+                        with analyzer.data_lock:
+                            target_dist = analyzer.params.target_distance
+                    except Exception:
+                        target_dist = 0
                     target_band_width = 1.0
                     target_band = f"{int(target_dist)}m-{int(target_dist)+target_band_width}m"
                     display_text = f"Points: {points} (Target {target_band}: {target_band_points})"
@@ -2049,8 +2072,35 @@ class ControlPanel(QWidget):
     
     def on_generate_report(self):
         """Handle generate report button click."""
-        self.generate_report.emit()
-        self.set_status("Generating report...")
+        # Use state manager to handle UI state
+        self.state_manager.transition('start_generating_report')
+        
+        try:
+            # Emit signal to generate report
+            self.generate_report.emit()
+            self.set_status("Generating report...")
+        except Exception as e:
+            print(f"Error generating report: {e}")
+            self.set_status(f"Error generating report: {str(e)}")
+            
+            # Reset state on error
+            self.state_manager.transition('stop_generating_report')
+            
+    def on_report_completed(self, success=True, report_path=None):
+        """
+        Handle report generation completion.
+        
+        Args:
+            success: Whether report generation was successful
+            report_path: Path to the generated report if successful
+        """
+        # Update UI state
+        self.state_manager.transition('stop_generating_report')
+        
+        if success and report_path:
+            self.set_status(f"Report generated successfully: {os.path.basename(report_path)}")
+        else:
+            self.set_status("Report generation failed or was cancelled")
     
     def update_metrics(self, metrics):
         """
@@ -2367,6 +2417,14 @@ class ControlPanel(QWidget):
         if not bag_path:
             self.set_status("Please select a bag file first")
             return
+        
+        # Check if we have a valid main window reference
+        if not hasattr(self, 'main_window') or self.main_window is None:
+            print("Warning: No main window reference available. Using direct signal.")
+            # Just emit the signal and let the connected slot handle it
+            self.play_rosbag.emit(bag_path)
+            self.set_status(f"Playing {os.path.basename(bag_path)}")
+            return
             
         # If there's any active data collection, stop it first
         if self.main_window and self.main_window.analyzer:
@@ -2397,13 +2455,20 @@ class ControlPanel(QWidget):
         
         # Reset timeline UI
         self.timeline_slider.setValue(0)
-        self.timeline_slider.setEnabled(True)  # Enable timeline slider
+        
+        # Use state manager to handle UI transitions
+        self.state_manager.transition('start_playback')
         
         # Enable the "Generate from Bag" checkbox now that a bag is loaded
         self.generate_from_bag_check.setEnabled(True)
         
         # Start playback - loop by default for normal playback
-        self.play_bag_with_options(bag_path, loop=True)
+        success = self.play_bag_with_options(bag_path, loop=True)
+        if not success:
+            # Revert state if operation failed
+            self.state_manager.transition('start_playback', success=False)
+            self.set_status("Failed to start bag playback")
+            return
         
         # Reset point counter display
         if hasattr(self, 'points_collected_label'):
@@ -2426,6 +2491,15 @@ class ControlPanel(QWidget):
         if not topics:
             self.set_status("Please specify at least one topic to record")
             return
+            
+        # Check if we have a valid main window reference before accessing analyzer
+        if not hasattr(self, 'main_window') or self.main_window is None:
+            print("Warning: No main window reference available. Using direct signal.")
+            # Just emit the signal and let the connected slot handle it
+            duration = self.duration_spin.value()
+            self.record_rosbag.emit(record_path, topics, duration)
+            self.set_status(f"Recording to {os.path.basename(record_path)}")
+            return
         
         # Get the recording duration
         duration_minutes = self.record_duration_spin.value()
@@ -2445,10 +2519,11 @@ class ControlPanel(QWidget):
                 except Exception as e:
                     print(f"Error stopping data collection: {e}")
         
+        # Use state manager to update UI state
+        self.state_manager.transition('start_recording')
+        
         # Start recording, passing the duration parameter
         self.record_rosbag.emit(record_path, topics, duration_minutes)
-        self.record_button.setEnabled(False)
-        self.stop_record_button.setEnabled(True)
         self.set_status(f"Recording to {record_path} {duration_text}: {', '.join(topics)}")
         
         # If a duration is set, start a timer to stop recording automatically
@@ -2469,16 +2544,32 @@ class ControlPanel(QWidget):
             if self.main_window.analyzer.is_recording:
                 self.set_status("Recording time limit reached, stopping...")
                 self.stop_rosbag.emit()
+                
+                # Update state using state manager
+                self.state_manager.transition('stop_recording')
 
     def on_stop_rosbag(self):
         """Handle stop bag button."""
+        # Check if we have a valid main window reference before accessing analyzer
+        if not hasattr(self, 'main_window') or self.main_window is None:
+            print("Warning: No main window reference available. Using direct signal.")
+            # Just emit the signal and let the connected slot handle it
+            self.stop_rosbag.emit()
+            self.set_status("Stopping ROS2 bag operations")
+            return
+            
+        # Clear any state related to collection from bag
+        self.bag_started_for_generation = False
+        
+        # Emit the signal to stop bag operations
         self.stop_rosbag.emit()
-        self.play_button.setEnabled(True)
-        self.record_button.setEnabled(True)
-        self.stop_playback_button.setEnabled(False)
-        self.stop_record_button.setEnabled(False)
-        self.timeline_slider.setValue(0)
-        self.timeline_slider.setEnabled(False)
+        
+        # Use state manager to handle UI updates for both playback and recording
+        if self.state_manager.get_state('playing_bag'):
+            self.state_manager.transition('stop_playback')
+        
+        if self.state_manager.get_state('recording_bag'):
+            self.state_manager.transition('stop_recording')
         
         # Disable the "Generate from Bag" checkbox and uncheck it
         self.generate_from_bag_check.setEnabled(False)
@@ -2560,3 +2651,53 @@ class ControlPanel(QWidget):
         except Exception as e:
             print(f"Error connecting signal: {e}")
             return False
+
+    def on_export_plot(self):
+        """
+        Handle export plot button click.
+        
+        This method forwards the export plot request to the main window
+        with proper state management.
+        """
+        # Use state manager to update UI state
+        if hasattr(self, 'state_manager'):
+            self.state_manager.transition('lock_ui')
+            
+        try:
+            # Emit signal to export plot
+            self.export_plot.emit()
+            self.set_status("Preparing to export plot...")
+        except Exception as e:
+            print(f"Error starting plot export: {e}")
+            self.set_status(f"Error: {str(e)}")
+            
+            # Reset state on error
+            if hasattr(self, 'state_manager'):
+                self.state_manager.transition('unlock_ui')
+
+    def check_for_analyzer(self):
+        """Check if the analyzer is available and update UI accordingly."""
+        has_analyzer = False
+        
+        if hasattr(self, 'main_window') and self.main_window is not None:
+            if hasattr(self.main_window, 'analyzer') and self.main_window.analyzer is not None:
+                has_analyzer = True
+        
+        # Enable/disable controls based on analyzer availability
+        self.start_button.setEnabled(has_analyzer)
+        
+        ros_buttons_enabled = has_analyzer
+        if has_analyzer and hasattr(self.main_window.analyzer, 'ros2_available'):
+            ros_buttons_enabled = self.main_window.analyzer.ros2_available
+        
+        self.play_button.setEnabled(ros_buttons_enabled)
+        self.stop_button.setEnabled(ros_buttons_enabled)
+        self.record_button.setEnabled(ros_buttons_enabled)
+        
+        # Update status message
+        if not has_analyzer:
+            self.set_status("No analyzer connected - visualization only")
+        elif not ros_buttons_enabled:
+            self.set_status("ROS2 not available - only collection mode available")
+        else:
+            self.set_status("Ready")
