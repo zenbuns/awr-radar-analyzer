@@ -18,6 +18,7 @@ from PyQt5.QtWidgets import QWidget, QVBoxLayout, QSizePolicy
 from PyQt5.QtCore import pyqtSignal
 
 from .styles import Colors
+from .scatter_optimizer import ScatterOptimizer
 
 
 class ScatterView(QWidget):
@@ -57,6 +58,9 @@ class ScatterView(QWidget):
         self.figure = None
         self.ax = None
         self.components = {}
+        
+        # Initialize the scatter optimizer for performance improvements
+        self.optimizer = ScatterOptimizer()
         
         # Set up the UI
         self.setup_ui()
@@ -343,42 +347,87 @@ class ScatterView(QWidget):
             intensities: Intensity values of all points.
             circles_data: List of dictionaries with circle data (x, y, intensities)
         """
-        if len(x) > 0:
-            self.components['scatter'].set_offsets(np.column_stack((x, y)))
-            self.components['scatter'].set_array(intensities)
-            
-            # Update each circle's scatter plot
-            for i, circle_data in enumerate(circles_data):
-                if i < len(self.components['circle_scatters']):
-                    scatter = self.components['circle_scatters'][i]
-                    circle_info = self.components['sampling_circles'][i]
+        try:
+            # Skip update if optimizer decides it's not necessary
+            if not self.optimizer.should_update(len(x)):
+                return
+                
+            # Apply intelligent downsampling for large datasets
+            if len(x) > self.optimizer.max_points:
+                x, y, intensities = self.optimizer.downsample(x, y, intensities)
+                
+            # Update main scatter plot with new data
+            if len(x) > 0:
+                # Set offsets and colors in one operation
+                self.components['scatter'].set_offsets(np.column_stack((x, y)))
+                self.components['scatter'].set_array(intensities)
+                
+                # Update scatter plot visibility
+                self.components['scatter'].set_visible(True)
+                
+                # Update each circle's scatter plot
+                for i, circle_data in enumerate(circles_data):
+                    if i < len(self.components['circle_scatters']):
+                        scatter = self.components['circle_scatters'][i]
+                        circle_info = self.components['sampling_circles'][i]
+                        
+                        # Only update if the circle is enabled and has data
+                        if circle_info['config']['enabled'] and len(circle_data['x']) > 0:
+                            # Downsample circle data if needed
+                            c_x, c_y = circle_data['x'], circle_data['y']
+                            c_intensities = circle_data['intensities']
+                            
+                            if len(c_x) > 500:  # Use smaller threshold for circles
+                                # Simple random sampling for circle points
+                                n_keep = 500
+                                indices = np.random.choice(len(c_x), n_keep, replace=False)
+                                c_x, c_y = c_x[indices], c_y[indices]
+                                
+                            # Update offsets in one operation
+                            scatter.set_offsets(np.column_stack((c_x, c_y)))
+                            scatter.set_visible(True)
+                        else:
+                            # Use empty array for no data (faster than removing/recreating)
+                            scatter.set_offsets(np.empty((0, 2)))
+                            scatter.set_visible(False)
+                
+                # Update statistics text - compute once and reuse
+                distances = np.sqrt(np.square(x) + np.square(y))
+                bins = np.arange(0, self.max_range + self.circle_interval, self.circle_interval)
+                counts, _ = np.histogram(distances, bins=bins)
+                
+                # Format statistics text
+                stats = f"⬤ Total points: {len(x)}"
+                if len(x) < self.optimizer.max_points:
+                    stats += " (showing all)"
+                else:
+                    original_count = self.optimizer.last_point_count
+                    percent = int(100 * len(x) / max(1, original_count))
+                    stats += f" (showing {percent}%)"
                     
-                    if circle_info['config']['enabled'] and len(circle_data['x']) > 0:
-                        scatter.set_offsets(np.column_stack((circle_data['x'], circle_data['y'])))
-                        scatter.set_visible(True)
-                    else:
-                        scatter.set_offsets(np.empty((0, 2)))
-                        scatter.set_visible(False)
+                stats += "\n"
+                
+                # Only include non-zero bins to keep text compact
+                for i in range(len(counts)):
+                    if counts[i] > 0:
+                        stats += f"⬤ {bins[i]:.0f}-{bins[i+1]:.0f}m: {counts[i]} pts\n"
+                self.components['stats_text'].set_text(stats)
+            else:
+                # Clear plots if no data - use empty arrays (more efficient)
+                self.components['scatter'].set_offsets(np.empty((0, 2)))
+                self.components['scatter'].set_visible(False)
+                
+                for scatter in self.components['circle_scatters']:
+                    scatter.set_offsets(np.empty((0, 2)))
+                    scatter.set_visible(False)
+                
+                self.components['stats_text'].set_text("No data")
             
-            # Update statistics text with improved formatting
-            distances = np.sqrt(np.square(x) + np.square(y))
-            bins = np.arange(0, self.max_range + self.circle_interval, self.circle_interval)
-            counts, _ = np.histogram(distances, bins=bins)
+            # Use draw_idle for more efficient rendering
+            self.canvas.draw_idle()
             
-            stats = f"⬤ Total points: {len(x)}\n"
-            for i in range(len(counts)):
-                if counts[i] > 0:
-                    stats += f"⬤ {bins[i]:.0f}-{bins[i+1]:.0f}m: {counts[i]} pts\n"
-            self.components['stats_text'].set_text(stats)
-        else:
-            # Clear plots if no data
-            self.components['scatter'].set_offsets(np.empty((0, 2)))
-            for scatter in self.components['circle_scatters']:
-                scatter.set_offsets(np.empty((0, 2)))
-            self.components['stats_text'].set_text("No data")
-        
-        # Redraw canvas
-        self.canvas.draw_idle()
+        except Exception as e:
+            print(f"Error updating scatter plot: {e}")
     
     def update_circle_stats(self, circle_stats):
         """
@@ -425,3 +474,45 @@ class ScatterView(QWidget):
     def clear_plot(self):
         """Clear all data from the plot. Legacy method - use clear_points instead."""
         self.clear_points()
+
+    def configure_optimizer(self, update_interval=None, max_points=None, adaptive_sampling=None):
+        """
+        Configure the scatter optimizer settings.
+        
+        Args:
+            update_interval: Time in seconds between updates.
+            max_points: Maximum number of points to display.
+            adaptive_sampling: Whether to use adaptive sampling.
+        """
+        if hasattr(self, 'optimizer'):
+            self.optimizer.configure(
+                update_interval=update_interval,
+                max_points=max_points,
+                adaptive_sampling=adaptive_sampling
+            )
+            
+    def update_point_limit(self, dataset_size):
+        """
+        Update the point limit based on dataset size.
+        
+        Args:
+            dataset_size: Total number of points in the dataset.
+        """
+        if hasattr(self, 'optimizer'):
+            # Scale max points based on dataset size
+            if dataset_size > 100000:
+                # Very large dataset
+                self.optimizer.set_max_points(3000)
+                self.optimizer.set_update_interval(0.2)
+            elif dataset_size > 50000:
+                # Large dataset
+                self.optimizer.set_max_points(5000)
+                self.optimizer.set_update_interval(0.15)
+            elif dataset_size > 10000:
+                # Medium dataset
+                self.optimizer.set_max_points(8000)
+                self.optimizer.set_update_interval(0.1)
+            else:
+                # Small dataset - show most or all points
+                self.optimizer.set_max_points(min(10000, dataset_size))
+                self.optimizer.set_update_interval(0.08)

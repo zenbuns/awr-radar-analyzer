@@ -14,7 +14,7 @@ from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QAction, QMenu, QToolBar, QStatusBar, QFileDialog, QMessageBox,
     QLabel, QFrame, QPushButton, QSizePolicy, QApplication, QProgressDialog,
-    QProgressBar, QTabWidget
+    QProgressBar, QTabWidget, QMenuBar
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSlot, QSize, QUrl, QThread, pyqtSignal
 from PyQt5.QtGui import QIcon, QPixmap, QFont, QDesktopServices
@@ -193,27 +193,51 @@ class MainWindow(QMainWindow):
         start_collection_action.triggered.connect(self.start_data_collection)
         data_menu.addAction(start_collection_action)
         
-        stop_collection_action = QAction("S&top Collection", self)
-        stop_collection_action.setShortcut("Esc")
+        stop_collection_action = QAction("Sto&p Collection", self)
+        stop_collection_action.setShortcut("Ctrl+Shift+Space")
         stop_collection_action.triggered.connect(self.stop_data_collection)
         data_menu.addAction(stop_collection_action)
         
         data_menu.addSeparator()
         
-        generate_report_action = QAction("&Generate Report", self)
-        generate_report_action.setShortcut("Ctrl+G")
-        generate_report_action.triggered.connect(self.generate_report)
-        data_menu.addAction(generate_report_action)
+        reset_data_action = QAction("&Reset Data", self)
+        reset_data_action.setShortcut("Ctrl+R")
+        reset_data_action.triggered.connect(self.handle_data_reset)
+        data_menu.addAction(reset_data_action)
+        
+        data_menu.addSeparator()
+        
+        gen_report_action = QAction("&Generate Report", self)
+        gen_report_action.setShortcut("Ctrl+G")
+        gen_report_action.triggered.connect(self.generate_report)
+        data_menu.addAction(gen_report_action)
         
         # View menu
         view_menu = menu_bar.addMenu("&View")
         
-        reset_heatmap_action = QAction("&Reset Heatmap", self)
-        reset_heatmap_action.setShortcut("Ctrl+R")
-        reset_heatmap_action.triggered.connect(self.reset_heatmap)
-        view_menu.addAction(reset_heatmap_action)
+        # Colormap submenu
+        colormap_menu = view_menu.addMenu("&Colormap")
+        
+        colormaps = {
+            'plasma': "Plasma (Default)",
+            'viridis': "Viridis", 
+            'inferno': "Inferno",
+            'magma': "Magma",
+            'cividis': "Cividis",
+            'turbo': "Turbo"
+        }
+        
+        for cmap_name, cmap_label in colormaps.items():
+            cmap_action = QAction(cmap_label, self)
+            cmap_action.triggered.connect(lambda checked, c=cmap_name: self.set_colormap(c))
+            colormap_menu.addAction(cmap_action)
         
         view_menu.addSeparator()
+        
+        reset_heatmap_action = QAction("Reset &Heatmap", self)
+        reset_heatmap_action.setShortcut("Ctrl+Shift+R")
+        reset_heatmap_action.triggered.connect(self.reset_heatmap)
+        view_menu.addAction(reset_heatmap_action)
         
         # Visualization performance submenu
         perf_menu = view_menu.addMenu("&Performance Settings")
@@ -1516,12 +1540,21 @@ class MainWindow(QMainWindow):
                         
                         # Primary ROI row
                         roi_avg_points = multi_frame_metrics.get('roi_avg_single_frame_count', 0)
+                        
+                        # Calculate correct total points (sum of inside and outside ROI)
+                        outside_points = multi_frame_metrics.get('outside_roi_combined_point_count', 0)
+                        total_points = roi_points + outside_points
+                        
+                        # Calculate correct 10-frame average
+                        outside_avg = multi_frame_metrics.get('outside_roi_avg_single_frame_count', 0)
+                        ten_frame_avg = roi_avg_points + outside_avg
+                        
                         table_rows.append(f"""
                             <tr>
                                 <td rowspan="{1 + len([c for c in self.analyzer.params.circles[1:] if c.enabled]) + 1}">{config}</td>
                                 <td rowspan="{1 + len([c for c in self.analyzer.params.circles[1:] if c.enabled]) + 1}">{distance}m</td>
-                                <td rowspan="{1 + len([c for c in self.analyzer.params.circles[1:] if c.enabled]) + 1}">{data['points']}</td>
-                                <td rowspan="{1 + len([c for c in self.analyzer.params.circles[1:] if c.enabled]) + 1}">{data['multi_frame_metrics'].get('ten_frame_avg_points', 0):.1f}</td>
+                                <td rowspan="{1 + len([c for c in self.analyzer.params.circles[1:] if c.enabled]) + 1}">{total_points}</td>
+                                <td rowspan="{1 + len([c for c in self.analyzer.params.circles[1:] if c.enabled]) + 1}">{ten_frame_avg:.1f}</td>
                                 <td rowspan="{1 + len([c for c in self.analyzer.params.circles[1:] if c.enabled]) + 1}">{data['density']:.3f} pts/m²</td>
                                 <td rowspan="{1 + len([c for c in self.analyzer.params.circles[1:] if c.enabled]) + 1}">{data['avg_intensity']:.3f}</td>
                                 <td>Primary ROI</td>
@@ -1623,6 +1656,15 @@ class MainWindow(QMainWindow):
                         # Get original results for fields not pre-processed
                         results = self.analyzer.config_results[config][distance]
                         
+                        # Calculate correct total points and averages
+                        roi_points = data['multi_frame_metrics'].get('roi_combined_point_count', 0)
+                        outside_points = data['multi_frame_metrics'].get('outside_roi_combined_point_count', 0)
+                        total_points = roi_points + outside_points
+                        
+                        roi_avg = data['multi_frame_metrics'].get('roi_avg_single_frame_count', 0)
+                        outside_avg = data['multi_frame_metrics'].get('outside_roi_avg_single_frame_count', 0)
+                        ten_frame_avg = roi_avg + outside_avg
+                        
                         section_html.append(f"""
                             <div id="tab-{config}-{distance}" class="tab-content">
                                 <h3 class="card-title">Target Distance: {distance}m</h3>
@@ -1630,12 +1672,12 @@ class MainWindow(QMainWindow):
                                 <div class="metrics-grid">
                                     <div class="metric">
                                         <div class="metric-label">Total Points</div>
-                                        <div class="metric-value">{results.get('total_points', 0)}</div>
+                                        <div class="metric-value">{total_points}</div>
                                     </div>
                                     
                                     <div class="metric">
                                         <div class="metric-label">10-Frame Average Points</div>
-                                        <div class="metric-value">{data['multi_frame_metrics'].get('ten_frame_avg_points', 0):.1f}</div>
+                                        <div class="metric-value">{ten_frame_avg:.1f}</div>
                                     </div>
                                     
                                     <div class="metric">
@@ -2057,27 +2099,163 @@ class MainWindow(QMainWindow):
                 3000
             )
     
-    @pyqtSlot()
     def optimize_visualization_pipeline(self):
         """
-        Automatically optimize the visualization pipeline based on system performance.
-        Analyzes current CPU load and adjusts heatmap update parameters accordingly.
+        Automatically optimize visualization pipeline based on system capabilities and dataset sizes.
+        
+        This function analyzes the current dataset size and system performance
+        to configure the optimal visualization settings.
         """
-        import psutil
+        try:
+            # Get dataset size indicators
+            data_size = 0
+            heatmap_size = 0
+            
+            if hasattr(self, 'analyzer') and hasattr(self.analyzer, 'live_heatmap_data'):
+                heatmap_data = self.analyzer.live_heatmap_data
+                if heatmap_data is not None:
+                    heatmap_size = heatmap_data.size
+            
+            if hasattr(self, 'analyzer') and hasattr(self.analyzer, 'point_cloud_data'):
+                point_cloud = self.analyzer.point_cloud_data
+                if point_cloud is not None and hasattr(point_cloud, 'x'):
+                    data_size = len(point_cloud.x)
+            
+            # Configure based on dataset size
+            if heatmap_size > 500000 or data_size > 10000:
+                # Very large dataset - use conservative settings
+                min_time = 0.25  # 4 FPS for heatmap
+                max_time = 1.0   # 1 FPS for contours
+                threshold = 10   # 10% change threshold
+                mode = "heatmap"  # Use simpler visualization mode
+                
+                # Set additional scatter view optimizations
+                if hasattr(self, 'scatter_view'):
+                    self.scatter_view.configure_optimizer(
+                        update_interval=0.2,  # 5 FPS
+                        max_points=3000,      # Aggressive downsampling
+                        adaptive_sampling=True
+                    )
+                    
+            elif heatmap_size > 200000 or data_size > 5000:
+                # Medium-large dataset
+                min_time = 0.15  # ~7 FPS
+                max_time = 0.6   # ~1.7 FPS for contours
+                threshold = 5    # 5% change threshold
+                mode = "combined"  # Can use combined mode with medium datasets
+                
+                # Medium settings for scatter view
+                if hasattr(self, 'scatter_view'):
+                    self.scatter_view.configure_optimizer(
+                        update_interval=0.15,  # ~7 FPS
+                        max_points=5000,       # Medium downsampling
+                        adaptive_sampling=True
+                    )
+                
+            else:
+                # Small dataset - can use more detailed visualization
+                min_time = 0.1   # 10 FPS
+                max_time = 0.3   # 3.3 FPS for contours
+                threshold = 2    # 2% change threshold (more frequent updates)
+                mode = "combined"  # Full combined mode for small datasets
+                
+                # Higher fidelity for scatter view with small datasets
+                if hasattr(self, 'scatter_view'):
+                    self.scatter_view.configure_optimizer(
+                        update_interval=0.1,   # 10 FPS
+                        max_points=10000,      # Show more points
+                        adaptive_sampling=True
+                    )
+            
+            # Apply the configuration
+            if hasattr(self, 'heatmap_view') and hasattr(self.heatmap_view, 'optimizer'):
+                self.heatmap_view.optimizer.configure(
+                    min_time_interval=min_time,
+                    max_time_interval=max_time,
+                    change_threshold_percent=threshold
+                )
+                
+                # Update visualization mode if needed
+                self.set_visualization_mode(mode)
+                
+                # Update status message
+                self.status_bar.showMessage(
+                    f"Auto-optimized for {data_size} points and {heatmap_size} heatmap cells: "
+                    f"{min_time:.2f}s min, {max_time:.2f}s max, {threshold}% threshold", 
+                    5000
+                )
+                
+                # Return configuration for testing
+                return {
+                    'min_time': min_time,
+                    'max_time': max_time,
+                    'threshold': threshold,
+                    'mode': mode
+                }
+                
+        except Exception as e:
+            # Log error and fall back to medium settings
+            print(f"Error optimizing visualization pipeline: {e}")
+            if hasattr(self, 'heatmap_view') and hasattr(self.heatmap_view, 'optimizer'):
+                self.heatmap_view.optimizer.configure(
+                    min_time_interval=0.2,
+                    max_time_interval=0.7,
+                    change_threshold_percent=5
+                )
+            if hasattr(self, 'scatter_view') and hasattr(self.scatter_view, 'optimizer'):
+                self.scatter_view.configure_optimizer(
+                    update_interval=0.15,
+                    max_points=5000,
+                    adaptive_sampling=True
+                )
+            self.status_bar.showMessage("Error optimizing visualization. Using default settings.", 3000)
+            return None
+    
+    def open_data_file(self):
+        """Open a saved radar data file."""
+        options = QFileDialog.Options()
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Open Radar Data", "", 
+            "Radar Data Files (*.dat);;CSV Files (*.csv);;All Files (*)",
+            options=options
+        )
         
-        # Get current CPU usage
-        cpu_percent = psutil.cpu_percent(interval=0.5)
+        if file_path:
+            if hasattr(self, 'analyzer') and self.analyzer is not None:
+                try:
+                    # Use the analyzer to load the data
+                    success = self.analyzer.load_data_from_file(file_path)
+                    
+                    if success:
+                        self.status_bar.showMessage(f"Loaded data from {file_path}", 3000)
+                        self.update_visualizations()
+                    else:
+                        QMessageBox.warning(self, "Error", "Failed to load data file.")
+                except Exception as e:
+                    QMessageBox.critical(self, "Error", f"Error loading data: {str(e)}")
+            else:
+                QMessageBox.warning(self, "Error", "Analyzer not initialized.")
+    
+    def save_data_file(self):
+        """Save radar data to a file."""
+        options = QFileDialog.Options()
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Save Radar Data", "", 
+            "Radar Data Files (*.dat);;CSV Files (*.csv);;All Files (*)",
+            options=options
+        )
         
-        # Determine appropriate settings based on CPU load
-        if cpu_percent < 30:
-            # Low CPU load, can use higher quality settings
-            self.configure_heatmap_update_params(0.1, 0.5, 30)
-            self.status_bar.showMessage("Auto-optimized for high performance", 3000)
-        elif cpu_percent < 60:
-            # Medium CPU load, use balanced settings
-            self.configure_heatmap_update_params(0.2, 0.7, 20)
-            self.status_bar.showMessage("Auto-optimized for balanced performance", 3000)
-        else:
-            # High CPU load, use performance-focused settings
-            self.configure_heatmap_update_params(0.3, 1.0, 15)
-            self.status_bar.showMessage("Auto-optimized for system performance", 3000)
+        if file_path:
+            if hasattr(self, 'analyzer') and self.analyzer is not None:
+                try:
+                    # Use the analyzer to save the data
+                    success = self.analyzer.save_data_to_file(file_path)
+                    
+                    if success:
+                        self.status_bar.showMessage(f"Saved data to {file_path}", 3000)
+                    else:
+                        QMessageBox.warning(self, "Error", "Failed to save data file.")
+                except Exception as e:
+                    QMessageBox.critical(self, "Error", f"Error saving data: {str(e)}")
+            else:
+                QMessageBox.warning(self, "Error", "Analyzer not initialized or no data to save.")

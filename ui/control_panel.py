@@ -1674,19 +1674,64 @@ class ControlPanel(QWidget):
         QApplication.processEvents()
     
     def reset_point_counter(self):
-        """Reset the point counter display and tracking state."""
+        """Reset the point counter display and state tracking."""
+        # Reset displayed values and counters
+        self.points_collected_label.setText("Points: 0")
+        self.progress_bar.setValue(0)
+        self.collection_time_label.setText("Time: 00:00")
+        
+        # Reset internal tracking variables
+        self.collection_start_time = None
         self.last_point_count = 0
+        self.collection_frames = 0
         self.point_update_counter = 0
         
-        # Keep track of whether we're in collection mode
-        collection_active = hasattr(self, 'collection_start_time') and self.collection_start_time is not None
+        # Reset experiment data in analyzer if available
+        analyzer = getattr(self, 'main_window', None)
+        if analyzer:
+            analyzer = getattr(analyzer, 'analyzer', None)
+            if analyzer:
+                try:
+                    with analyzer.data_lock:
+                        if hasattr(analyzer, 'experiment_data'):
+                            # Reset all points lists
+                            if hasattr(analyzer.experiment_data, 'x_points'):
+                                analyzer.experiment_data.x_points = []
+                            if hasattr(analyzer.experiment_data, 'y_points'):
+                                analyzer.experiment_data.y_points = []
+                            if hasattr(analyzer.experiment_data, 'z_points'):
+                                analyzer.experiment_data.z_points = []
+                            if hasattr(analyzer.experiment_data, 'intensity'):
+                                analyzer.experiment_data.intensity = []
+                            if hasattr(analyzer.experiment_data, 'snr'):
+                                analyzer.experiment_data.snr = []
+                            if hasattr(analyzer.experiment_data, 'noise'):
+                                analyzer.experiment_data.noise = []
+                                
+                            # Reset all multi-frame metrics
+                            if hasattr(analyzer.experiment_data, 'multi_frame_metrics'):
+                                analyzer.experiment_data.multi_frame_metrics = {
+                                    'total_frames': 0,
+                                    'roi_combined_point_count': 0,
+                                    'outside_roi_combined_point_count': 0,
+                                    'roi_avg_single_frame_count': 0,
+                                    'outside_roi_avg_single_frame_count': 0,
+                                    'ten_frame_avg_points': 0
+                                }
+                                
+                            # Reset distance band metadata
+                            if hasattr(analyzer.experiment_data, 'metadata'):
+                                metadata = getattr(analyzer.experiment_data, 'metadata', {})
+                                if metadata:
+                                    metadata['distance_bands'] = {}
+                                    metadata['target_band'] = ''
+                                    metadata['target_band_count'] = 0
+                                    analyzer.experiment_data.metadata = metadata
+                except Exception as e:
+                    print(f"Error resetting point data: {e}")
         
-        # Only reset display if we're not actively collecting data
-        if not collection_active:
-            self.points_collected_label.setText("Points: 0")
-            print("Point counter reset")
-        else:
-            print("Point counter tracking reset, but display preserved during active collection")
+        # Print a debug confirmation
+        print("All collection stats reset to zero.")
     
     def on_timeline_changed(self, value):
         """Handle timeline slider value change.
@@ -1971,7 +2016,9 @@ class ControlPanel(QWidget):
         display_text = None  # Only set if value changes
         points = -1  # Invalid value to detect if it was set
         target_band_points = -1  # Count points at the target distance band
-        distance_bands = {}  # Store all distance bands
+        distance_bands = {}
+        roi_points = 0
+        outside_roi_points = 0
         
         try:
             # Use the direct reference to the main window
@@ -1982,9 +2029,22 @@ class ControlPanel(QWidget):
             if analyzer and hasattr(analyzer, 'data_lock'):
                 # Use the analyzer's data lock for thread safety
                 with analyzer.data_lock:
-                    # Get total points count
+                    # Get total points count - correctly count inside and outside ROI
                     if hasattr(analyzer, 'experiment_data') and hasattr(analyzer.experiment_data, 'x_points'):
-                        points = len(analyzer.experiment_data.x_points)
+                        # Old way - this is the total of all points
+                        total_raw_points = len(analyzer.experiment_data.x_points)
+                        
+                        # New way - count ROI points and outside ROI points
+                        # Get the multi-frame metrics if available
+                        if hasattr(analyzer.experiment_data, 'multi_frame_metrics'):
+                            metrics = analyzer.experiment_data.multi_frame_metrics
+                            roi_points = metrics.get('roi_combined_point_count', 0)
+                            outside_roi_points = metrics.get('outside_roi_combined_point_count', 0)
+                            # Calculate total points as sum of both
+                            points = roi_points + outside_roi_points
+                        else:
+                            # Fall back to old method if we don't have multi-frame metrics
+                            points = total_raw_points
                         
                         # Get distance band information if available in metadata
                         if hasattr(analyzer.experiment_data, 'metadata'):
@@ -2017,7 +2077,7 @@ class ControlPanel(QWidget):
                                 
                                 print(f"DEBUG - Circle points in current frame: {circle_points}, " +
                                       f"Target band ({target_band_key}): {target_band_current}, " +
-                                      f"Total accumulated points: {points}, " +
+                                      f"Total points: ROI({roi_points}) + Outside({outside_roi_points}) = {points}, " +
                                       f"Progress: {progress}%")
             else:
                 print("WARNING: No data_lock available for thread safety! Cannot reliably read point count.")
@@ -2040,9 +2100,19 @@ class ControlPanel(QWidget):
                         target_dist = 0
                     target_band_width = 1.0
                     target_band = f"{int(target_dist)}m-{int(target_dist)+target_band_width}m"
-                    display_text = f"Points: {points} (Target {target_band}: {target_band_points})"
+                    
+                    # Include ROI breakdown in the display text when applicable
+                    if roi_points > 0 or outside_roi_points > 0:
+                        display_text = f"Points: {points} (ROI: {roi_points}, Outside: {outside_roi_points})"
+                        display_text += f" (Target {target_band}: {target_band_points})"
+                    else:
+                        display_text = f"Points: {points} (Target {target_band}: {target_band_points})"
                 else:
-                    display_text = f"Points: {points}"
+                    # Include ROI breakdown in the display text when applicable
+                    if roi_points > 0 or outside_roi_points > 0:
+                        display_text = f"Points: {points} (ROI: {roi_points}, Outside: {outside_roi_points})"
+                    else:
+                        display_text = f"Points: {points}"
                 
                 # Add distance band breakdown if we have it
                 if distance_bands and self.point_update_counter >= 20:

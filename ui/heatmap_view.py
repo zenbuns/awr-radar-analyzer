@@ -350,25 +350,34 @@ class HeatmapView(QWidget):
                 self.setup_plot()
                 return
                 
-            # Update colormap normalization
+            # Update colormap normalization - only if data contains nonzero values
             nonzero_values = data[data > 0]
             if nonzero_values.size > 0:
+                # Use percentile instead of max to avoid outlier influence (faster)
                 vmax = np.percentile(nonzero_values, 98)
                 if vmax < 0.1:
                     vmax = 0.1
                 
-                # Adjust power normalization based on point density
-                density_ratio = nonzero_values.size / data.size
-                if density_ratio < 0.01:
-                    power = 0.3
-                elif density_ratio > 0.2:
-                    power = 0.7
-                else:
-                    power = 0.5
+                # Skip normalization update if the new vmax is very close to previous
+                update_norm = True
+                if 'norm' in self.components:
+                    old_vmax = self.components['norm'].vmax
+                    if abs(vmax - old_vmax) / old_vmax < 0.05:  # Less than 5% change
+                        update_norm = False
                 
-                norm = colors.PowerNorm(gamma=power, vmin=self.noise_floor, vmax=vmax)
-                self.components['norm'] = norm
-                self.components['heatmap'].set_norm(norm)
+                if update_norm:
+                    # Adjust power normalization based on point density
+                    density_ratio = nonzero_values.size / data.size
+                    if density_ratio < 0.01:
+                        power = 0.3
+                    elif density_ratio > 0.2:
+                        power = 0.7
+                    else:
+                        power = 0.5
+                    
+                    norm = colors.PowerNorm(gamma=power, vmin=self.noise_floor, vmax=vmax)
+                    self.components['norm'] = norm
+                    self.components['heatmap'].set_norm(norm)
             
             # Always update the heatmap data which is relatively fast
             self.components['heatmap'].set_data(data)
@@ -378,14 +387,16 @@ class HeatmapView(QWidget):
             alpha = 0.85 if self.visualization_mode == 'heatmap' else 0.5
             self.components['heatmap'].set_alpha(alpha)
             
-            # Clear existing contours
+            # Clear existing contours if needed
             if 'contour' in self.components and self.components['contour'] is not None:
-                for coll in self.components['contour'].collections:
-                    try:
-                        coll.remove()
-                    except Exception:
-                        pass
-                self.components['contour'] = None
+                # Only remove if we're switching modes or updating contours
+                if self.visualization_mode not in ['contour', 'combined'] or self.optimizer.should_update_contours():
+                    for coll in self.components['contour'].collections:
+                        try:
+                            coll.remove()
+                        except Exception:
+                            pass
+                    self.components['contour'] = None
             
             # Only update contours if the visualization mode requires it and the optimizer allows it
             if self.visualization_mode in ['contour', 'combined'] and self.optimizer.should_update_contours():
@@ -393,20 +404,41 @@ class HeatmapView(QWidget):
                 nonzero_count = np.count_nonzero(data)
                 if nonzero_count > 20:  # Skip if too few points
                     try:
-                        levels = np.linspace(self.noise_floor, np.max(data), 6)
-                        # Create contours only if we have valid levels
-                        if levels.size > 1 and levels[-1] > levels[0]:
-                            self.components['contour'] = self.ax.contour(
-                                data,
-                                levels=levels,
-                                extent=[-self.max_range, self.max_range, -self.max_range, self.max_range],
-                                colors='white' if self.visualization_mode == 'combined' else 'black',
-                                alpha=0.5,
-                                linewidths=0.5
-                            )
+                        # Use downsampled data for contour generation on large arrays
+                        contour_data = data
+                        if data.size > 40000:  # Only downsample for large arrays
+                            # Calculate stride based on array size
+                            stride = max(1, min(4, data.shape[0] // 100))
+                            contour_data = data[::stride, ::stride]
+                        
+                        # Use evenly distributed levels for better visualization
+                        if np.max(contour_data) > self.noise_floor:
+                            # Generate fewer contour levels for better performance
+                            num_levels = 5 if self.visualization_mode == 'combined' else 6
+                            levels = np.linspace(self.noise_floor, np.max(contour_data), num_levels)
+                            
+                            # Create contours only if we have valid levels
+                            if levels.size > 1 and levels[-1] > levels[0]:
+                                # Set contour colors and properties based on mode
+                                contour_color = 'white' if self.visualization_mode == 'combined' else 'black'
+                                line_width = 0.5 if self.visualization_mode == 'combined' else 0.75
+                                
+                                self.components['contour'] = self.ax.contour(
+                                    contour_data,
+                                    levels=levels,
+                                    extent=[-self.max_range, self.max_range, -self.max_range, self.max_range],
+                                    colors=contour_color,
+                                    alpha=0.5,
+                                    linewidths=line_width
+                                )
                     except Exception as e:
                         print(f"Error creating contours: {e}")
             
+            # Only redraw if requested
+            if redraw:
+                # Use draw_idle for better performance
+                self.canvas.draw_idle()
+                
         except Exception as e:
             print(f"Error updating visualization: {e}")
     
