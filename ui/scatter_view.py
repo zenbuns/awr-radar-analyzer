@@ -13,6 +13,7 @@ from matplotlib.figure import Figure
 from matplotlib.patches import Circle, Arc
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
+from matplotlib.colors import Normalize
 
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QSizePolicy
 from PyQt5.QtCore import pyqtSignal
@@ -93,8 +94,8 @@ class ScatterView(QWidget):
         self.ax = self.figure.add_subplot(111)
         
         # Set background colors - deeper scientific background
-        self.ax.set_facecolor('#050510')  # Deeper navy blue scientific background
-        self.figure.patch.set_facecolor('#050510')
+        self.ax.set_facecolor('#020924')  # Even deeper navy blue for better contrast
+        self.figure.patch.set_facecolor('#020924')
         
         # Set plot limits - use max_range directly for consistency
         self.ax.set_xlim(-self.max_range, self.max_range)
@@ -110,7 +111,7 @@ class ScatterView(QWidget):
                 continue
             x = r * np.sin(theta)
             y = r * np.cos(theta)
-            self.ax.plot(x, y, color='#334455', linestyle='-', linewidth=0.3, alpha=0.3)
+            self.ax.plot(x, y, color='#223355', linestyle='-', linewidth=0.3, alpha=0.3)
         
         # Define the interval for reference circles with scientific precision
         circle_interval_m = 5  # 5m intervals for precision
@@ -133,7 +134,7 @@ class ScatterView(QWidget):
                 theta1=0,
                 theta2=180,
                 fill=False,
-                color='#AABBDD',  # Even lighter scientific blue-gray
+                color='#99CCFF',  # Brighter blue for contrast against dark background
                 linestyle='-',
                 linewidth=0.6,
                 alpha=0.6
@@ -144,8 +145,8 @@ class ScatterView(QWidget):
             if 0 < r <= self.max_range:
                 self.ax.text(
                     r * 0.05, r, f"{int(r)}m", ha='left', va='bottom', 
-                    color='#AABBDD', fontsize=7, weight='normal',
-                    bbox=dict(facecolor='#050510', edgecolor='none', 
+                    color='#99CCFF', fontsize=7, weight='normal',
+                    bbox=dict(facecolor='#020924', edgecolor='none', 
                              alpha=0.7, pad=1, boxstyle='round,pad=0.1')
                 )
         
@@ -243,12 +244,12 @@ class ScatterView(QWidget):
             self.ax.plot([x, x], [0, tick_length], color='#00DD88', alpha=0.3, linewidth=0.4)
         
         # Add professional sensor location indicator at origin
-        sensor_circle = Circle((0, 0), 0.5, fill=True, color='#00DDCC', alpha=0.7)
+        sensor_circle = Circle((0, 0), 0.5, fill=True, color='#00EEFF', alpha=0.7)
         self.ax.add_patch(sensor_circle)
-        sensor_ring = Circle((0, 0), 0.7, fill=False, color='#00FFEE', linewidth=0.5, alpha=0.5)
+        sensor_ring = Circle((0, 0), 0.7, fill=False, color='#00FFFF', linewidth=0.5, alpha=0.5)
         self.ax.add_patch(sensor_ring)
         
-        # Create scatter plots with enhanced aesthetics - increased contrast and viridis colormap
+        # Create scatter plots with enhanced aesthetics - using viridis colormap for better visualization
         self.components['scatter'] = self.ax.scatter(
             [], [], s=22, c=[], cmap='viridis', alpha=1.0, vmin=0.0, vmax=1.0
         )
@@ -315,29 +316,29 @@ class ScatterView(QWidget):
             })
         
         # Set labels and title with scientific radar terminology
-        self.ax.set_xlabel('Azimuth (m)', fontsize=9, labelpad=10, color='#BBDDFF')
-        self.ax.set_ylabel('Range (m)', fontsize=9, labelpad=10, color='#BBDDFF')
+        self.ax.set_xlabel('Azimuth (m)', fontsize=9, labelpad=10, color='#99CCFF')
+        self.ax.set_ylabel('Range (m)', fontsize=9, labelpad=10, color='#99CCFF')
         self.ax.set_title('Radar Point Cloud', fontsize=11, color='#DDEEFF', weight='normal')
         
         # Configure ticks with scientific precision
-        self.ax.tick_params(axis='x', colors='#AABBDD', labelsize=8, width=1.0, length=4)
-        self.ax.tick_params(axis='y', colors='#AABBDD', labelsize=8, width=1.0, length=4)
+        self.ax.tick_params(axis='x', colors='#99CCFF', labelsize=8, width=1.0, length=4)
+        self.ax.tick_params(axis='y', colors='#99CCFF', labelsize=8, width=1.0, length=4)
         
         # Set spine colors for scientific border
         for spine in self.ax.spines.values():
-            spine.set_color('#223344')
+            spine.set_color('#334466')
             spine.set_linewidth(0.5)
         
         # Add colorbar with enhanced scientific styling
         self.colorbar = self.figure.colorbar(
             self.components['scatter'],
             ax=self.ax,
-            label='Signal Intensity (dB)',
+            label='Signal Intensity (Blue: Low, Yellow: High)',
             fraction=0.03,
             pad=0.02
         )
-        self.colorbar.ax.yaxis.label.set_color('#BBDDFF')
-        self.colorbar.ax.tick_params(colors='#AACCEE')
+        self.colorbar.ax.yaxis.label.set_color('#99CCFF')
+        self.colorbar.ax.tick_params(colors='#99CCFF')
         
         # Add technical statistics box with enhanced resolution information
         grid_size = int(2 * self.max_range)
@@ -351,15 +352,15 @@ class ScatterView(QWidget):
         self.components['res_stats'] = self.ax.text(
             0.98, 0.98, res_text,
             transform=self.ax.transAxes,
-            color='#AABBDD',
+            color='#99CCFF',
             fontsize=7,
             ha='right',
             va='top',
             bbox=dict(
                 boxstyle='round,pad=0.2',
-                facecolor='#101025',
+                facecolor='#051530',
                 alpha=0.8,
-                edgecolor='#334466'
+                edgecolor='#334488'
             )
         )
         
@@ -369,12 +370,12 @@ class ScatterView(QWidget):
             transform=self.ax.transAxes,
             verticalalignment='top',
             fontsize=8,
-            color='#BBDDFF',
+            color='#99CCFF',
             bbox=dict(
                 boxstyle='round,pad=0.3',
-                facecolor='#101025',
+                facecolor='#051530',
                 alpha=0.8,
-                edgecolor='#334466'
+                edgecolor='#334488'
             )
         )
         
@@ -383,17 +384,17 @@ class ScatterView(QWidget):
             transform=self.ax.transAxes,
             verticalalignment='top',
             fontsize=8,
-            color='#BBDDFF',
+            color='#99CCFF',
             bbox=dict(
                 boxstyle='round,pad=0.3',
-                facecolor='#101025',
+                facecolor='#051530',
                 alpha=0.8,
-                edgecolor='#334466'
+                edgecolor='#334488'
             )
         )
         
         # Enable grid for scientific precision - very subtle
-        self.ax.grid(True, linestyle=':', linewidth=0.2, alpha=0.3, color='#223344')
+        self.ax.grid(True, linestyle=':', linewidth=0.2, alpha=0.3, color='#223366')
         
         # Adjust layout
         self.figure.tight_layout()
@@ -522,9 +523,22 @@ class ScatterView(QWidget):
                 
             # Update main scatter plot with new data
             if len(x) > 0:
+                # Normalize intensity values to 0-1 range
+                if len(intensities) > 0:
+                    min_intensity = np.min(intensities)
+                    max_intensity = np.max(intensities)
+                    
+                    # Prevent division by zero if all intensities are the same
+                    if max_intensity > min_intensity:
+                        normalized_intensities = (intensities - min_intensity) / (max_intensity - min_intensity)
+                    else:
+                        normalized_intensities = np.zeros_like(intensities)
+                else:
+                    normalized_intensities = np.array([])
+                
                 # Set offsets and colors in one operation
                 self.components['scatter'].set_offsets(np.column_stack((x, y)))
-                self.components['scatter'].set_array(intensities)
+                self.components['scatter'].set_array(normalized_intensities)
                 
                 # Update scatter plot visibility
                 self.components['scatter'].set_visible(True)
