@@ -12,7 +12,6 @@ import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 from matplotlib.patches import Circle, Arc
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
 from matplotlib.colors import Normalize
 
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QSizePolicy
@@ -20,6 +19,7 @@ from PyQt5.QtCore import pyqtSignal
 
 from .styles import Colors
 from .scatter_optimizer import ScatterOptimizer
+from .custom_toolbar import NonBlockingNavigationToolbar
 
 
 class ScatterView(QWidget):
@@ -32,6 +32,8 @@ class ScatterView(QWidget):
     Attributes:
         max_range: Maximum radar range in meters.
         circle_interval: Interval between range circles.
+        circle_distance: Distance from origin to sampling circle.
+        circle_radius: Radius of sampling circle.
         figure: The Matplotlib figure instance.
         ax: The axes for the scatter plot.
         components: Dictionary of plot components.
@@ -50,10 +52,17 @@ class ScatterView(QWidget):
         super().__init__(parent)
         
         # Default parameters
-        self.max_range = 35.0  # Ensure max range is exactly 35.0 meters
+        self.max_range = 35.0  # Default maximum range in meters
         self.circle_interval = 10.0
         self.circle_distance = 5.0
         self.circle_radius = 0.5
+        self.noise_floor = 0.05
+        
+        # Initialize data tracking for saving
+        self.latest_x = np.array([])
+        self.latest_y = np.array([])
+        self.latest_intensities = np.array([])
+        self.latest_points = 0
         
         # Plot components
         self.figure = None
@@ -79,7 +88,7 @@ class ScatterView(QWidget):
         self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         
         # Create minimalist toolbar
-        self.toolbar = NavigationToolbar(self.canvas, self)
+        self.toolbar = NonBlockingNavigationToolbar(self.canvas, self, view_type="scatter")
         
         # Add widgets to layout
         layout.addWidget(self.toolbar)
@@ -244,12 +253,6 @@ class ScatterView(QWidget):
             tick_length = 0.5 if x % 10 == 0 else 0.25
             self.ax.plot([x, x], [0, tick_length], color='#00DD88', alpha=0.3, linewidth=0.4)
         
-        # Add professional sensor location indicator at origin
-        sensor_circle = Circle((0, 0), 0.5, fill=True, color='#00EEFF', alpha=0.7)
-        self.ax.add_patch(sensor_circle)
-        sensor_ring = Circle((0, 0), 0.7, fill=False, color='#00FFFF', linewidth=0.5, alpha=0.5)
-        self.ax.add_patch(sensor_ring)
-        
         # Create scatter plots with enhanced aesthetics - using viridis colormap for better visualization
         self.components['scatter'] = self.ax.scatter(
             [], [], s=22, c=[], cmap='viridis', alpha=1.0, vmin=0.0, vmax=1.0
@@ -327,30 +330,7 @@ class ScatterView(QWidget):
         self.colorbar.ax.yaxis.label.set_color('#99CCFF')
         self.colorbar.ax.tick_params(colors='#99CCFF')
         
-        # Add technical statistics box with enhanced resolution information
-        grid_size = int(2 * self.max_range)
-        res_text = (
-            f"Resolution: {1.0:.1f}m\n"
-            f"Range: 0-{self.max_range:.0f}m\n"
-            f"Sampling: adaptive\n"
-            f"Grid: {grid_size}×{grid_size} px"
-        )
-        
-        self.components['res_stats'] = self.ax.text(
-            0.98, 0.98, res_text,
-            transform=self.ax.transAxes,
-            color='#99CCFF',
-            fontsize=10,  # Increased from 7
-            ha='right',
-            va='top',
-            bbox=dict(
-                boxstyle='round,pad=0.2',
-                facecolor='#051530',
-                alpha=0.8,
-                edgecolor='#334488'
-            )
-        )
-        
+     
         # Add statistics text boxes with scientific notation
         self.components['stats_text'] = self.ax.text(
             0.02, 0.98, '',
@@ -494,11 +474,22 @@ class ScatterView(QWidget):
         Update the scatter plot with new data.
         
         Args:
-            x: X-coordinates of all points.
-            y: Y-coordinates of all points.
-            intensities: Intensity values of all points.
-            circles_data: List of dictionaries with circle data (x, y, intensities)
+            x: X-coordinates array
+            y: Y-coordinates array
+            intensities: Signal intensity array
+            circles_data: List of dictionaries with circle data
         """
+        # Store the latest data for potential saving
+        self.latest_x = x
+        self.latest_y = y
+        self.latest_intensities = intensities
+        self.latest_points = len(x)
+        
+        # Verify that we have valid data
+        if x is None or y is None or len(x) == 0 or len(y) == 0:
+            # If no data, don't update anything
+            return
+        
         try:
             # Skip update if optimizer decides it's not necessary
             if not self.optimizer.should_update(len(x)):
@@ -663,12 +654,19 @@ class ScatterView(QWidget):
         """Clear all point data from the plot while preserving other elements."""
         if 'scatter' in self.components:
             self.components['scatter'].set_offsets(np.empty((0, 2)))
+            self.components['scatter'].set_array(np.array([]))
             for scatter in self.components['circle_scatters']:
                 scatter.set_offsets(np.empty((0, 2)))
             self.components['stats_text'].set_text("")
             self.components['circle_stats_text'].set_text("")
             # Redraw the canvas
             self.canvas.draw_idle()
+        
+        # Reset latest data
+        self.latest_x = np.array([])
+        self.latest_y = np.array([])
+        self.latest_intensities = np.array([])
+        self.latest_points = 0
 
     # Keep the original method for backwards compatibility
     def clear_plot(self):

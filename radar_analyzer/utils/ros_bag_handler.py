@@ -19,13 +19,13 @@ from visualization_msgs.msg import MarkerArray
 from std_msgs.msg import Bool
 
 
-def play_rosbag(analyzer, bag_path: str, loop: bool = True) -> None:
+def play_rosbag(analyzer, bag_path: str, loop: bool = False) -> None:
     """Start playback of a ROS2 bag file.
     
     Args:
         analyzer: RadarPointCloudAnalyzer instance.
         bag_path: Path to the bag file to play.
-        loop: Whether to loop the playback or play once.
+        loop: Whether to loop the playback or play once. Defaults to False.
         
     Raises:
         RuntimeError: If the bag file doesn't exist or can't be played.
@@ -200,6 +200,10 @@ def stop_rosbag(analyzer) -> None:
     Args:
         analyzer: RadarPointCloudAnalyzer instance.
     """
+    # Keep track of previous state for signaling
+    was_recording = analyzer.is_recording
+    was_playing = analyzer.is_playing
+    
     # Reset state flags first to prevent processing of new messages during cleanup
     analyzer.is_recording = False
     analyzer.is_playing = False
@@ -307,7 +311,16 @@ def stop_rosbag(analyzer) -> None:
     except Exception as e:
         analyzer.get_logger().error(f"Error clearing circle ROI data: {str(e)}")
         
+    # Final cleanup and notification
     analyzer.get_logger().info("ROS2 bag stopped and data cleared")
+    
+    # Emit the appropriate signal based on what was previously active
+    try:
+        if (was_playing or was_recording) and hasattr(analyzer, 'signals'):
+            # Notify the UI that playback/recording has ended
+            analyzer.signals.bag_playback_ended.emit()
+    except Exception as e:
+        analyzer.get_logger().error(f"Error emitting bag_playback_ended signal: {str(e)}")
 
 
 def seek_rosbag(analyzer, position: float) -> None:
@@ -392,7 +405,7 @@ def seek_rosbag(analyzer, position: float) -> None:
                     analyzer.get_logger().warn(f"Error stopping previous playback: {str(e)}")
             
             # Check whether to loop the playback
-            loop = getattr(analyzer, 'bag_looping', True)  # Default to True for backward compatibility
+            loop = getattr(analyzer, 'bag_looping', False)  # Default to False for backward compatibility
             
             # Start new playback with the offset
             cmd = [
@@ -432,7 +445,7 @@ def seek_rosbag(analyzer, position: float) -> None:
         
         # Fallback: Just restart from beginning
         analyzer.get_logger().info(f"Restarting bag from beginning: {analyzer.current_bag_path}")
-        loop = getattr(analyzer, 'bag_looping', True)  # Default to True for backward compatibility
+        loop = getattr(analyzer, 'bag_looping', False)  # Default to False for backward compatibility
         play_rosbag(analyzer, analyzer.current_bag_path, loop)
         
     except Exception as e:

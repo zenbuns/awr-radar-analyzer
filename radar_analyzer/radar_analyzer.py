@@ -444,13 +444,55 @@ class RadarPointCloudAnalyzer(Node):
 
     def timer_callback(self) -> None:
         """
-        Periodic timer callback for monitoring and maintenance tasks.
+        Regular timer callback for low-frequency tasks.
         
-        This method handles various periodic tasks including:
-        - Monitoring bag playback/recording status
-        - Checking point cloud message reception
-        - Performing diagnostics when needed
+        This method is called periodically to handle diagnostics, heartbeats,
+        monitoring, and low-priority tasks that don't need to run on every
+        point cloud update.
         """
+        # Update heartbeat for health monitoring
+        self.last_heartbeat = self.get_clock().now()
+        
+        # Check bag playback process status
+        if hasattr(self, 'rosbag_proc') and hasattr(self, 'is_playing') and hasattr(self, 'is_recording'):
+            if (self.is_playing or self.is_recording) and self.rosbag_proc is not None:
+                # Check if process is still running
+                if self.rosbag_proc.poll() is not None:
+                    # Process has terminated
+                    exit_code = self.rosbag_proc.returncode
+                    self.get_logger().info(f"ROS2 bag process has terminated with exit code: {exit_code}")
+                    
+                    # Reset recording/playing state
+                    if self.is_recording:
+                        self.is_recording = False
+                        self.get_logger().info("Recording state reset after process termination")
+                    
+                    if self.is_playing:
+                        self.is_playing = False
+                        self.get_logger().info("Playback state reset after process termination")
+                        # Notify UI that playback has ended
+                        try:
+                            self.signals.bag_playback_ended.emit()
+                        except Exception as e:
+                            self.get_logger().error(f"Failed to emit bag_playback_ended signal: {str(e)}")
+                    
+                    self.rosbag_proc = None
+                    self.get_logger().info("ROS2 bag process has terminated")
+        
+        # Additional check for recording state - in case process was killed externally
+        if hasattr(self, 'is_recording') and self.is_recording:
+            if not hasattr(self, 'rosbag_proc') or self.rosbag_proc is None or self.rosbag_proc.poll() is not None:
+                # Recording process is not running but state indicates recording
+                self.get_logger().warn("Recording state inconsistency detected - resetting state")
+                self.is_recording = False
+                
+                # Notify UI that recording has ended
+                try:
+                    self.signals.bag_playback_ended.emit()
+                except Exception as e:
+                    self.get_logger().error(f"Failed to emit bag_playback_ended signal: {str(e)}")
+        
+        # Existing timer callback code continues...
         # Monitor data collection progress if active
         if self.collecting_data and self.collection_start_time is not None:
             elapsed = time.time() - self.collection_start_time
@@ -504,17 +546,77 @@ class RadarPointCloudAnalyzer(Node):
                         if elapsed_playback >= (self.bag_duration - 1.0):
                             self.get_logger().info(f"Bag nearing end: {elapsed_playback:.1f}s of {self.bag_duration:.1f}s")
                             
-                            # If we're past the end and still playing, force stop
-                            if elapsed_playback > self.bag_duration + 2.0:
-                                self.get_logger().info("Bag should have ended by now, forcing stop")
-                                # Emit signal before stopping to ensure UI is notified
+                            # If we're at or past 95% of the bag duration, stop playback immediately
+                            # Using 95% to ensure we stop before reaching the exact end which might be causing issues
+                            if elapsed_playback >= (self.bag_duration * 0.95):
+                                self.get_logger().info(f"Reached at least 95% of bag duration ({elapsed_playback:.1f}s of {self.bag_duration:.1f}s), stopping playback")
+                                
+                                # First, notify UI that playback has ended
                                 try:
                                     self.signals.bag_playback_ended.emit()
-                                    self.get_logger().info("Emitted bag_playback_ended signal to UI (timeout)")
+                                    self.get_logger().info("Emitted bag_playback_ended signal to UI (end of bag)")
                                 except Exception as e:
                                     self.get_logger().error(f"Failed to emit bag_playback_ended signal: {str(e)}")
-                                    
-                                stop_rosbag(self)
+                                
+                                # Force terminate the bag playback process
+                                if hasattr(self, 'rosbag_proc') and self.rosbag_proc is not None:
+                                    try:
+                                        import os
+                                        import signal
+                                        # Get process info
+                                        pid = self.rosbag_proc.pid
+                                        pgid = os.getpgid(pid)
+                                        self.get_logger().info(f"Forcefully terminating ROS2 bag process {pid} (group {pgid})")
+                                        # Send SIGTERM first
+                                        os.killpg(pgid, signal.SIGTERM)
+                                        # Reset state immediately
+                                        self.is_playing = False
+                                        self.visible = False
+                                        # Wait very briefly
+                                        time.sleep(0.5)
+                                        # Send SIGKILL as backup if needed
+                                        try:
+                                            if self.rosbag_proc.poll() is None:  # Process still running
+                                                os.killpg(pgid, signal.SIGKILL)
+                                                self.get_logger().info(f"Sent SIGKILL to bag process {pid}")
+                                        except Exception as kill_err:
+                                            self.get_logger().error(f"Error sending SIGKILL: {str(kill_err)}")
+                                    except Exception as term_err:
+                                        self.get_logger().error(f"Error terminating bag process: {str(term_err)}")
+                                
+                                # Perform cleanup
+                                self.hard_reset_pcl()
+                                if self.collecting_data:
+                                    self.stop_data_collection()
+                                
+                                # Additional reset of state variables
+                                self.rosbag_proc = None
+                                self.is_playing = False
+                                self.current_bag_path = None
+                                self.bag_start_time = None
+                            else:
+                                # If we've reached the bag duration, stop playback immediately
+                                if elapsed_playback >= self.bag_duration:
+                                    self.get_logger().info("Bag has reached its end, stopping playback")
+                                    # Emit signal before stopping to ensure UI is notified
+                                    try:
+                                        self.signals.bag_playback_ended.emit()
+                                        self.get_logger().info("Emitted bag_playback_ended signal to UI (end of bag)")
+                                    except Exception as e:
+                                        self.get_logger().error(f"Failed to emit bag_playback_ended signal: {str(e)}")
+                                        
+                                    stop_rosbag(self)
+                                # Fallback: If we're way past the end and still playing, force stop
+                                elif elapsed_playback > self.bag_duration + 2.0:
+                                    self.get_logger().info("Bag should have ended by now, forcing stop")
+                                    # Emit signal before stopping to ensure UI is notified
+                                    try:
+                                        self.signals.bag_playback_ended.emit()
+                                        self.get_logger().info("Emitted bag_playback_ended signal to UI (timeout)")
+                                    except Exception as e:
+                                        self.get_logger().error(f"Failed to emit bag_playback_ended signal: {str(e)}")
+                                        
+                                    stop_rosbag(self)
                 
                     # Monitor point cloud reception during playback
                     elif hasattr(self, 'last_pcl_msg_time') and self.last_pcl_msg_time is not None:
@@ -1182,7 +1284,7 @@ class RadarPointCloudAnalyzer(Node):
         except Exception as e:
             self.get_logger().error(f"Error during PCL hard reset: {str(e)}")
             
-    def play_rosbag(self, bag_path: str, loop: bool = True) -> bool:
+    def play_rosbag(self, bag_path: str, loop: bool = False) -> bool:
         """
         Play a ROS2 bag file.
         
@@ -1191,7 +1293,7 @@ class RadarPointCloudAnalyzer(Node):
         
         Args:
             bag_path: Path to the ROS2 bag file to play
-            loop: Whether to loop the playback when it ends
+            loop: Whether to loop the playback when it ends (defaults to False)
             
         Returns:
             Success status of the playback operation

@@ -13,7 +13,7 @@ from PyQt5.QtWidgets import (
     QPushButton, QProgressBar, QFormLayout, QButtonGroup,
     QRadioButton, QFileDialog, QDoubleSpinBox, QTabWidget,
     QGridLayout, QFrame, QDialog, QListWidget, QListWidgetItem,
-    QInputDialog
+    QInputDialog, QDialogButtonBox, QMessageBox
 )
 from PyQt5.QtGui import QPixmap, QColor, QPainter, QIcon
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QSize, QDateTime, QThread
@@ -152,6 +152,36 @@ class ControlPanel(QWidget):
         # Set layout properties
         main_layout.setSpacing(5)
         main_layout.setContentsMargins(5, 5, 5, 5)
+        
+        # Initialize state of all UI elements
+        self.initialize_ui_state()
+    
+    def initialize_ui_state(self):
+        """Initialize the UI state based on current application state."""
+        # Initialize ROS2 bag controls state
+        if hasattr(self, 'rosbag_group'):
+            # Check if we have an analyzer and it's in a recording/playing state
+            if hasattr(self, 'main_window') and self.main_window and hasattr(self.main_window, 'analyzer'):
+                analyzer = self.main_window.analyzer
+                
+                if hasattr(analyzer, 'is_recording') and analyzer.is_recording:
+                    self.rosbag_group.setTitle("ROS2 Bag Controls - Recording")
+                    if hasattr(self, 'recording_status_label'):
+                        self.recording_status_label.setText("Recording in Progress")
+                        self.recording_status_label.setStyleSheet("font-weight: bold; color: #F44336;")
+                elif hasattr(analyzer, 'is_playing') and analyzer.is_playing:
+                    self.rosbag_group.setTitle("ROS2 Bag Controls - Playing")
+                else:
+                    self.rosbag_group.setTitle("ROS2 Bag Controls")
+                    if hasattr(self, 'recording_status_label'):
+                        self.recording_status_label.setText("Record Settings")
+                        self.recording_status_label.setStyleSheet("font-weight: bold; color: #757575;")
+            else:
+                # No analyzer or not initialized yet, set default state
+                self.rosbag_group.setTitle("ROS2 Bag Controls")
+                if hasattr(self, 'recording_status_label'):
+                    self.recording_status_label.setText("Record Settings")
+                    self.recording_status_label.setStyleSheet("font-weight: bold; color: #757575;")
     
     def create_scatter_controls(self, parent_layout):
         """
@@ -871,9 +901,9 @@ class ControlPanel(QWidget):
         Args:
             parent_layout: Parent layout to add widgets to.
         """
-        rosbag_group = QGroupBox("ROS2 Bag Controls")
-        rosbag_group.setStyleSheet("QGroupBox { font-weight: bold; }")
-        rosbag_layout = QHBoxLayout(rosbag_group)
+        self.rosbag_group = QGroupBox("ROS2 Bag Controls")
+        self.rosbag_group.setStyleSheet("QGroupBox { font-weight: bold; }")
+        rosbag_layout = QHBoxLayout(self.rosbag_group)
         rosbag_layout.setContentsMargins(15, 20, 15, 15)  # More generous margins
         
         # Left side - Playback controls with clear section header
@@ -1081,11 +1111,11 @@ class ControlPanel(QWidget):
         recording_layout = QVBoxLayout()
         recording_layout.setSpacing(12)  # Increased spacing for better readability
         
-        # Add recording header for visual separation
-        recording_header = QLabel("Recording")
-        recording_header.setStyleSheet("font-weight: bold; color: #F44336;")
-        recording_header.setAlignment(Qt.AlignLeft)
-        recording_layout.addWidget(recording_header)
+        # Add recording header for visual separation - using a status label that will update
+        self.recording_status_label = QLabel("Record Settings")
+        self.recording_status_label.setStyleSheet("font-weight: bold; color: #757575;")
+        self.recording_status_label.setAlignment(Qt.AlignLeft)
+        recording_layout.addWidget(self.recording_status_label)
         
         # Record path selection - improved with better visual cues
         record_path_layout = QHBoxLayout()
@@ -1265,7 +1295,7 @@ class ControlPanel(QWidget):
         rosbag_layout.addLayout(recording_layout)
         
         # Add to parent layout
-        parent_layout.addWidget(rosbag_group)
+        parent_layout.addWidget(self.rosbag_group)
     
     def create_pointcloud_controls(self, parent_layout):
         """
@@ -1498,13 +1528,13 @@ class ControlPanel(QWidget):
             self.play_bag_with_options(bag_path, loop=False)
             QTimer.singleShot(500, self._start_collection_from_bag)
     
-    def play_bag_with_options(self, bag_path, loop=True):
+    def play_bag_with_options(self, bag_path, loop=False):
         """
         Start bag playback with the specified options and error handling.
         
         Args:
             bag_path: Path to the bag file to play
-            loop: Whether to loop playback
+            loop: Whether to loop playback (defaults to False)
             
         Returns:
             bool: Whether playback was started successfully
@@ -1623,66 +1653,42 @@ class ControlPanel(QWidget):
         Handle the end of ROS2 bag playback.
         
         This method is called when the ROS2 bag playback ends.
-        It resets the UI elements related to bag playback and ensures
-        any data generation state is properly cleared.
+        It also handles when recording ends (either normally or unexpectedly).
         """
-        self.set_status("Bag playback ended")
-        print("Bag playback ended event received")
+        # Reset UI state for playback
+        self.state_manager.transition('stop_playback')
         
-        # First, update timeline UI
-        self.timeline_slider.setValue(0)
-        self.timeline_slider.setEnabled(False)
-        self.play_button.setEnabled(True)
-        self.stop_playback_button.setEnabled(False)
+        # Also reset recording state in case it was a recording that ended
+        if self.state_manager.get_state('recording_bag'):
+            self.state_manager.transition('stop_recording')
+            self.set_status("Recording stopped")
         
-        # Process UI updates immediately
-        QApplication.processEvents()
+        # Stop recording timer if active
+        if hasattr(self, 'recording_timer') and self.recording_timer.isActive():
+            self.recording_timer.stop()
         
-        # Force a hard reset of PCL data to ensure circle ROI data is cleared
-        if self.main_window and hasattr(self.main_window, 'analyzer'):
-            analyzer = self.main_window.analyzer
-            if hasattr(analyzer, 'hard_reset_pcl'):
-                print("Forcing hard reset of PCL data to clear circle ROI data")
-                analyzer.hard_reset_pcl()
+        # Reset bag group title explicitly
+        if hasattr(self, 'rosbag_group'):
+            self.rosbag_group.setTitle("ROS2 Bag Controls")
         
-        # If we were generating data, stop collection and disable checkbox
-        if self.generate_from_bag_check.isChecked():
-            print("Stopping data collection due to bag playback ending")
-            
-            # Disable checkbox first to prevent triggering more events
-            self.generate_from_bag_check.blockSignals(True)
-            self.generate_from_bag_check.setChecked(False)
-            self.generate_from_bag_check.blockSignals(False)
-            
-            # Make sure data collection is stopped
-            if hasattr(self, 'bag_started_for_generation') and self.bag_started_for_generation:
-                print("Stopping collection from bag playback end handler")
-                # Stop collection gracefully
-                try:
-                    self.stop_collection.emit()
-                except Exception as e:
-                    print(f"Error stopping collection: {e}")
+        # Reset recording status label explicitly
+        if hasattr(self, 'recording_status_label'):
+            self.recording_status_label.setText("Record Settings")
+            self.recording_status_label.setStyleSheet("font-weight: bold; color: #757575;")
+        
+        # Check if we should restart the bag playback for data generation
+        if self.bag_started_for_generation and hasattr(self, 'generate_from_bag_check'):
+            if self.generate_from_bag_check.isChecked():
+                # Reset the heatmap for a new iteration
+                self.reset_heatmap.emit()
                 
-                # Reset the flag
+                # Restart bag playback
+                QTimer.singleShot(500, self._restart_bag_and_collection)
+            else:
                 self.bag_started_for_generation = False
-                
-                # Update UI elements related to data collection
-                self.start_button.setEnabled(True)
-                self.stop_button.setEnabled(False)
-                
-                if hasattr(self, 'progress_timer') and self.progress_timer.isActive():
-                    self.progress_timer.stop()
-                
-                self.set_status("Data generation stopped as bag playback ended")
-        
-        # Reset the point counter state
-        self.reset_point_counter()
-        
-        if hasattr(self, 'progress_bar'):
-            self.progress_bar.setValue(0)
-            
-        # Final UI update
-        QApplication.processEvents()
+                self.set_status("Bag playback complete")
+        else:
+            self.set_status("Bag playback complete")
     
     def reset_point_counter(self):
         """Reset the point counter display and state tracking."""
@@ -2398,6 +2404,13 @@ class ControlPanel(QWidget):
         import subprocess
         import time
         
+        # Check if there's already a finder thread running
+        if hasattr(self, 'bag_finder_thread') and self.bag_finder_thread is not None:
+            if self.bag_finder_thread.isRunning():
+                # Thread is already running, don't start another one
+                print("A bag finder thread is already running, not starting another one")
+                return
+        
         # Create a worker thread for scanning directories
         class BagFinderThread(QThread):
             # Define signals for thread communication
@@ -2410,11 +2423,15 @@ class ControlPanel(QWidget):
                 super().__init__()
                 self.search_paths = search_paths
                 self.stop_requested = False
+                self.max_runtime = 30  # Maximum runtime in seconds to prevent hanging
                 
             def run(self):
+                start_time = time.time()
                 total_paths = len(self.search_paths)
                 for i, path in enumerate(self.search_paths):
-                    if self.stop_requested:
+                    # Check for timeout or stop request
+                    if self.stop_requested or (time.time() - start_time) > self.max_runtime:
+                        self.update_status.emit("Search stopped (timeout or requested)")
                         break
                         
                     if not os.path.isdir(path):
@@ -2426,16 +2443,20 @@ class ControlPanel(QWidget):
                     # More efficient approach: first find .db3 files in top directories
                     top_db3_files = glob.glob(os.path.join(path, "*.db3"))
                     for db3_file in top_db3_files:
-                        if self.stop_requested:
+                        if self.stop_requested or (time.time() - start_time) > self.max_runtime:
                             break
                         bag_dir = os.path.dirname(db3_file)
                         self._process_potential_bag(bag_dir)
+                    
+                    # Check stop condition again
+                    if self.stop_requested or (time.time() - start_time) > self.max_runtime:
+                        break
                     
                     # Then check immediate subdirectories (depth=1)
                     try:
                         # Use os.listdir which is faster than glob for this purpose
                         for subdir in os.listdir(path):
-                            if self.stop_requested:
+                            if self.stop_requested or (time.time() - start_time) > self.max_runtime:
                                 break
                                 
                             subdir_path = os.path.join(path, subdir)
@@ -2454,6 +2475,8 @@ class ControlPanel(QWidget):
                                 # Look for db3 files in this likely directory
                                 try:
                                     for item in os.listdir(subdir_path):
+                                        if self.stop_requested or (time.time() - start_time) > self.max_runtime:
+                                            break
                                         if item.endswith(".db3"):
                                             nested_dir = os.path.join(subdir_path, os.path.dirname(item))
                                             self._process_potential_bag(nested_dir)
@@ -2463,10 +2486,13 @@ class ControlPanel(QWidget):
                                     continue
                     except (PermissionError, OSError):
                         continue
-                        
-                    self.search_complete.emit()
                 
-                self.update_status.emit("Search complete")
+                # Send completion signal unless we were stopped
+                if not self.stop_requested and (time.time() - start_time) <= self.max_runtime:
+                    self.search_complete.emit()
+                    self.update_status.emit("Search complete")
+                else:
+                    self.update_status.emit("Search stopped")
                 
             def _process_potential_bag(self, bag_dir):
                 # Check if this is a valid ROS2 bag (has metadata.yaml)
@@ -2482,6 +2508,8 @@ class ControlPanel(QWidget):
                             total_size = 0
                             db_files = glob.glob(os.path.join(bag_dir, "*.db3"))
                             for db_file in db_files:
+                                if self.stop_requested:
+                                    break
                                 try:
                                     total_size += os.path.getsize(db_file)
                                 except (OSError, PermissionError):
@@ -2602,7 +2630,10 @@ class ControlPanel(QWidget):
         cancel_button.clicked.connect(dialog.reject)
         
         # Make sure to clean up thread when dialog closes
-        dialog.finished.connect(worker.stop)
+        dialog.finished.connect(lambda: self._clean_up_bag_finder(worker))
+        
+        # Store reference to the thread for management
+        self.bag_finder_thread = worker
         
         # Start the worker thread
         worker.start()
@@ -2619,6 +2650,19 @@ class ControlPanel(QWidget):
             return True
         
         return False
+
+    def _clean_up_bag_finder(self, thread):
+        """Ensure bag finder thread is properly cleaned up."""
+        if thread and thread.isRunning():
+            thread.stop()
+            # Give the thread a moment to stop
+            thread.wait(1000)  # Wait up to 1 second for the thread to finish
+            if thread.isRunning():
+                print("Warning: BagFinderThread did not stop properly")
+        
+        # Clear the reference to avoid memory leaks
+        if hasattr(self, 'bag_finder_thread'):
+            self.bag_finder_thread = None
 
     def on_play_rosbag(self):
         """Handle play bag button."""
@@ -2690,112 +2734,71 @@ class ControlPanel(QWidget):
             QTimer.singleShot(1000, self._start_collection_from_bag)
 
     def on_record_rosbag(self):
-        """Handle record bag button."""
-        # Get the recording path
-        record_path = self.record_path_edit.text().strip()
-        if not record_path:
-            # If path is empty, show a save dialog to let the user choose a location and filename
-            default_dir = self.last_used_directory() or os.path.expanduser("~")
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            default_filename = f"radar_data_{timestamp}"
-            
-            # Create a directory for the bag if it doesn't exist
-            suggested_path = os.path.join(default_dir, default_filename)
-            
-            # Show directory selection dialog
-            record_path = QFileDialog.getExistingDirectory(
-                self, 
-                "Select Directory to Save ROS2 Bag",
-                default_dir,
-                QFileDialog.ShowDirsOnly
-            )
-            
-            if not record_path:
-                self.set_status("Recording cancelled: No save location selected")
-                return
-                
-            # Use timestamp to create a subdirectory
-            record_path = os.path.join(record_path, default_filename)
-            
-            # Update the text field
-            self.record_path_edit.setText(record_path)
-            self.save_last_used_directory(os.path.dirname(record_path))
+        """Handle record bag button - show setup dialog and start recording if confirmed."""
+        # Show recording setup dialog
+        params = self.prepare_recording_dialog()
+        if not params:
+            return  # User canceled
         
-        # Create the directory if it doesn't exist
+        # Extract parameters
+        folder = params["folder"]
+        duration = params["duration"]
+        topics = params["topics"]
+        all_topics = params["all_topics"]
+        
+        # Create a unique subfolder with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        record_path = os.path.join(folder, f"radar_recording_{timestamp}")
+        
         try:
+            # Create the directory
             os.makedirs(record_path, exist_ok=True)
         except Exception as e:
-            self.set_status(f"Error creating directory: {e}")
+            QMessageBox.critical(self, "Recording Error", f"Failed to create recording directory: {str(e)}")
             return
         
-        topics = [t.strip() for t in self.topics_edit.text().split(',') if t.strip()]
-        if not topics:
-            self.set_status("Please specify at least one topic to record")
-            return
-            
-        # Check if we have a valid main window reference before accessing analyzer
-        if not hasattr(self, 'main_window') or self.main_window is None:
-            print("Warning: No main window reference available. Using direct signal.")
-            # Just emit the signal and let the connected slot handle it
-            duration = self.record_duration_spin.value()
-            self.record_rosbag.emit(record_path, topics, duration)
-            self.set_status(f"Recording to {os.path.basename(record_path)}")
-            return
-        
-        # Get the recording duration based on the unit selected
-        duration_value = self.record_duration_spin.value()
-        duration_unit = self.duration_unit_combo.currentText()
-        
-        # Convert to seconds for the API call (ROS2 bag API uses seconds)
-        duration_seconds = duration_value
-        if duration_unit == "min" and duration_value > 0:
-            duration_seconds = duration_value * 60
-        
-        # Format duration text for status message
-        if duration_value == 0:
-            duration_text = "without time limit"
-        else:
-            if duration_unit == "min":
-                duration_text = f"for {duration_value} min"
-            else:
-                minutes = duration_value // 60
-                seconds = duration_value % 60
-                if minutes > 0:
-                    duration_text = f"for {minutes} min {seconds} sec"
-                else:
-                    duration_text = f"for {seconds} sec"
-        
-        # If we're also collecting data, make sure the experiment data is cleared
-        if self.main_window and self.main_window.analyzer:
-            analyzer = self.main_window.analyzer
-            if hasattr(analyzer, 'collecting_data') and analyzer.collecting_data:
-                # Stop any current collection before starting a new one
+        # Stop any ongoing data collection if needed
+        if self.main_window and self.main_window.analyzer and hasattr(self.main_window.analyzer, 'collecting_data'):
+            if self.main_window.analyzer.collecting_data:
                 try:
-                    print("Stopping current data collection before starting bag recording")
                     self.stop_collection.emit()
-                    # Allow time for the collection to stop
                     QApplication.processEvents()
                     time.sleep(0.2)
                 except Exception as e:
                     print(f"Error stopping data collection: {e}")
         
-        # Use state manager to update UI state
+        # Format topics list for display
+        if all_topics:
+            topics_display = "all topics"
+        else:
+            topics_display = ", ".join(topics)
+        
+        # Update UI state
         self.state_manager.transition('start_recording')
         
-        # Start recording, passing the duration parameter in seconds
-        self.record_rosbag.emit(record_path, topics, duration_seconds)
-        self.set_status(f"Recording to {os.path.basename(record_path)} {duration_text}: {', '.join(topics)}")
+        # Format duration text for status message
+        if duration == 0:
+            duration_text = "without time limit"
+        else:
+            minutes = duration // 60
+            seconds = duration % 60
+            if minutes > 0:
+                duration_text = f"for {minutes} min {seconds} sec"
+            else:
+                duration_text = f"for {seconds} sec"
         
-        # If a duration is set, start a timer to stop recording automatically
-        if duration_seconds > 0:
-            # Convert to milliseconds for the timer
-            duration_ms = duration_seconds * 1000
-            
-            # Create a single-shot timer to stop recording after the specified duration
+        # Start recording
+        self.record_rosbag.emit(record_path, topics, duration)
+        self.set_status(f"Recording to {os.path.basename(record_path)} {duration_text}: {topics_display}")
+        
+        # Set timer if duration is limited
+        if duration > 0:
+            duration_ms = duration * 1000
             QTimer.singleShot(duration_ms, self.on_recording_timeout)
+            self.recording_end_time = time.time() + duration
             
-            # Store the expected end time for UI updates
-            self.recording_end_time = time.time() + duration_seconds
+            # Update the recording status label to show countdown
+            self.start_recording_timer()
 
     def on_recording_timeout(self):
         """Called when the recording timer expires."""
@@ -2820,6 +2823,10 @@ class ControlPanel(QWidget):
             
         # Clear any state related to collection from bag
         self.bag_started_for_generation = False
+        
+        # Stop recording timer if active
+        if hasattr(self, 'recording_timer') and self.recording_timer.isActive():
+            self.recording_timer.stop()
         
         # Emit the signal to stop bag operations
         self.stop_rosbag.emit()
@@ -2989,3 +2996,251 @@ class ControlPanel(QWidget):
         
         # Update the bag size estimate
         self.update_bag_size_estimate()
+
+    def prepare_recording_dialog(self):
+        """Show dialog to configure ROS2 bag recording settings.
+        
+        Returns:
+            dict: Recording parameters if confirmed, None if canceled
+        """
+        from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QGroupBox, 
+                                   QLabel, QPushButton, QLineEdit, QSpinBox, 
+                                   QComboBox, QRadioButton, QDialogButtonBox, QFileDialog)
+        
+        # Create dialog and layout
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Setup ROS2 Bag Recording")
+        dialog.setMinimumSize(600, 400)
+        layout = QVBoxLayout(dialog)
+        
+        # 1. Folder selection section
+        folder_group = QGroupBox("1. Select Recording Folder")
+        folder_layout = QVBoxLayout(folder_group)
+        
+        folder_path_layout = QHBoxLayout()
+        folder_path_edit = QLineEdit()
+        folder_path_edit.setPlaceholderText("Select where to save ROS2 bag...")
+        
+        # Define a non-blocking browse function
+        def browse_folder():
+            # Temporarily disable the button to prevent multiple clicks
+            browse_button.setEnabled(False)
+            QApplication.processEvents()
+            
+            try:
+                self._select_recording_folder(folder_path_edit)
+            finally:
+                # Re-enable the button
+                browse_button.setEnabled(True)
+                # Update validation
+                validate_inputs()
+        
+        browse_button = QPushButton("Browse...")
+        browse_button.clicked.connect(browse_folder)
+        
+        folder_path_layout.addWidget(folder_path_edit, 3)
+        folder_path_layout.addWidget(browse_button, 1)
+        folder_layout.addLayout(folder_path_layout)
+        
+        # Pre-populate with last used directory if available
+        last_dir = self.last_used_directory()
+        if last_dir:
+            folder_path_edit.setText(last_dir)
+        
+        # 2. Recording duration section
+        duration_group = QGroupBox("2. Set Recording Duration")
+        duration_layout = QHBoxLayout(duration_group)
+        
+        duration_spin = QSpinBox()
+        duration_spin.setRange(0, 3600)
+        duration_spin.setValue(60)
+        duration_spin.setSpecialValueText("No limit")
+        
+        unit_combo = QComboBox()
+        unit_combo.addItems(["seconds", "minutes"])
+        unit_combo.setCurrentIndex(1)  # Default to minutes
+        
+        duration_layout.addWidget(QLabel("Duration:"), 1)
+        duration_layout.addWidget(duration_spin, 2)
+        duration_layout.addWidget(unit_combo, 1)
+        
+        # 3. Topics selection section
+        topics_group = QGroupBox("3. Select Topics to Record")
+        topics_layout = QVBoxLayout(topics_group)
+        
+        all_topics_radio = QRadioButton("Record all topics")
+        all_topics_radio.setChecked(True)
+        
+        custom_topics_radio = QRadioButton("Custom topics:")
+        custom_topics_edit = QLineEdit()
+        custom_topics_edit.setPlaceholderText("Enter comma-separated topic names...")
+        custom_topics_edit.setEnabled(False)
+        
+        # Connect radio buttons to enable/disable custom topics field
+        all_topics_radio.toggled.connect(lambda checked: custom_topics_edit.setEnabled(not checked))
+        
+        topics_layout.addWidget(all_topics_radio)
+        topics_layout.addWidget(custom_topics_radio)
+        topics_layout.addWidget(custom_topics_edit)
+        
+        # Storage estimation
+        storage_label = QLabel("Estimated storage: Unknown")
+        
+        # Update storage estimation when values change
+        def update_storage_estimate():
+            try:
+                # Basic estimation logic - just a rough calculation
+                duration_val = duration_spin.value()
+                if duration_val == 0:
+                    storage_label.setText("Estimated storage: Unknown (no time limit)")
+                    return
+                    
+                if unit_combo.currentText() == "minutes":
+                    duration_val *= 60  # Convert to seconds
+                    
+                # Rough estimate: 5MB per minute of recording (adjust based on your data)
+                est_mb = (duration_val / 60) * 5
+                
+                if est_mb < 1000:
+                    storage_label.setText(f"Estimated storage: {est_mb:.1f} MB")
+                else:
+                    storage_label.setText(f"Estimated storage: {est_mb/1000:.2f} GB")
+            except Exception:
+                storage_label.setText("Estimated storage: Unknown")
+            
+            # Process events to keep UI responsive
+            QApplication.processEvents()
+        
+        # Connect signals to update storage estimate
+        duration_spin.valueChanged.connect(update_storage_estimate)
+        unit_combo.currentIndexChanged.connect(update_storage_estimate)
+        
+        # Initially calculate estimate
+        update_storage_estimate()
+        
+        # Add sections to main layout
+        layout.addWidget(folder_group)
+        layout.addWidget(duration_group)
+        layout.addWidget(topics_group)
+        layout.addWidget(storage_label)
+        
+        # Dialog buttons
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        ok_button = button_box.button(QDialogButtonBox.Ok)
+        ok_button.setText("Start Recording")
+        ok_button.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
+        
+        layout.addWidget(button_box)
+        
+        # Validation function
+        def validate_inputs():
+            folder = folder_path_edit.text().strip()
+            ok_button.setEnabled(bool(folder))
+            
+            # Process events to ensure button state updates immediately
+            QApplication.processEvents()
+        
+        # Connect signals for validation
+        folder_path_edit.textChanged.connect(validate_inputs)
+        
+        # Set initial state
+        validate_inputs()
+        
+        # Set to non-modal and process events to keep UI fluid during dialog execution
+        dialog.setWindowModality(Qt.WindowModal)
+        QApplication.processEvents()
+        
+        # Show dialog and process result
+        if dialog.exec_() == QDialog.Accepted:
+            # Gather parameters
+            folder = folder_path_edit.text().strip()
+            duration = duration_spin.value()
+            if unit_combo.currentText() == "minutes":
+                duration *= 60  # Convert to seconds
+                
+            if all_topics_radio.isChecked():
+                topics = ["-a"]  # Special flag for all topics
+            else:
+                topics = [t.strip() for t in custom_topics_edit.text().split(',') if t.strip()]
+                if not topics:
+                    topics = ["-a"]  # Default to all if none specified
+            
+            return {
+                "folder": folder,
+                "duration": duration,
+                "topics": topics,
+                "all_topics": all_topics_radio.isChecked()
+            }
+        
+        return None  # Canceled
+
+    def _select_recording_folder(self, edit_field):
+        """Helper to select a recording folder and update the edit field."""
+        default_dir = self.last_used_directory() or os.path.expanduser("~")
+        
+        # Create a dialog instance instead of using the static method
+        # This allows us to make it non-modal and use proper options
+        dialog = QFileDialog(self, "Select Folder for ROS2 Bag Recording", default_dir)
+        dialog.setFileMode(QFileDialog.Directory)
+        dialog.setOption(QFileDialog.ShowDirsOnly, True)
+        dialog.setOption(QFileDialog.DontUseNativeDialog, True)  # Use Qt's dialog instead of native for better control
+        
+        # Use a non-blocking approach
+        dialog.setWindowModality(Qt.WindowModal)  # Modal to parent window only
+        
+        # Process events during dialog execution to keep UI responsive
+        result = dialog.exec_()
+        QApplication.processEvents()
+        
+        if result == QDialog.Accepted:
+            selected_files = dialog.selectedFiles()
+            if selected_files:
+                folder = selected_files[0]
+                edit_field.setText(folder)
+                self.save_last_used_directory(folder)
+                
+                # Process events again to ensure UI updates
+                QApplication.processEvents()
+
+    def start_recording_timer(self):
+        """Start a timer to update the recording status with a countdown."""
+        # Create timer if it doesn't exist
+        if not hasattr(self, 'recording_timer'):
+            self.recording_timer = QTimer()
+            self.recording_timer.timeout.connect(self.update_recording_status)
+        else:
+            # Stop any existing timer
+            self.recording_timer.stop()
+        
+        # Start timer to update every second
+        self.recording_timer.start(1000)  # 1000ms = 1 second
+        
+        # Update immediately
+        self.update_recording_status()
+
+    def update_recording_status(self):
+        """Update the recording status label with remaining time."""
+        if not hasattr(self, 'recording_end_time') or not self.state_manager.get_state('recording_bag'):
+            # Not recording or no end time set
+            if hasattr(self, 'recording_timer'):
+                self.recording_timer.stop()
+            return
+        
+        # Calculate remaining time
+        remaining = max(0, self.recording_end_time - time.time())
+        minutes = int(remaining // 60)
+        seconds = int(remaining % 60)
+        
+        # Update status label with countdown
+        if hasattr(self, 'recording_status_label'):
+            if remaining > 0:
+                self.recording_status_label.setText(f"Recording in Progress - {minutes:02d}:{seconds:02d} remaining")
+            else:
+                self.recording_status_label.setText("Recording - Finishing up...")
+                
+        # If recording finished, update UI
+        if remaining <= 0 and self.state_manager.get_state('recording_bag'):
+            if hasattr(self, 'recording_timer'):
+                self.recording_timer.stop()

@@ -98,7 +98,7 @@ class HeatmapView(QWidget):
         """Set up the heatmap plot with initial components."""
         # Create initial heatmap data if not existing
         if self.heatmap_data is None:
-            grid_size = int(2 * self.max_range / 1.0)  # Lower resolution: 1.0m instead of 0.5m
+            grid_size = int(2 * self.max_range / 0.5)  # Higher resolution: 0.5m instead of 1.0m
             # Ensure grid size is even for better memory alignment
             if grid_size % 2 == 1:
                 grid_size += 1
@@ -285,11 +285,7 @@ class HeatmapView(QWidget):
             tick_length = 0.5 if x % 10 == 0 else 0.25
             self.ax.plot([x, x], [0, tick_length], color='#00DD88', alpha=0.3, linewidth=0.4)
                 
-        # Add professional sensor location indicator at origin
-        sensor_circle = Circle((0, 0), 0.5, fill=True, color='#00DDCC', alpha=0.7)
-        self.ax.add_patch(sensor_circle)
-        sensor_ring = Circle((0, 0), 0.7, fill=False, color='#00FFEE', linewidth=0.5, alpha=0.5)
-        self.ax.add_patch(sensor_ring)
+        
         
         # Add target arc with scientific styling
         self.components['target_arc'] = Arc(
@@ -372,41 +368,9 @@ class HeatmapView(QWidget):
             spine.set_linewidth(0.5)
         
         # Add technical statistics box with enhanced resolution information
-        res_text = (
-            f"Resolution: {1.0:.1f}m/px\n"
-            f"Range: 0-{self.max_range:.0f}m\n"
-            f"μ-threshold: {self.noise_floor:.3f}\n"
-            f"Grid: {grid_size}×{grid_size} px"
-        )
+     
         
-        self.components['res_text'] = self.ax.text(
-            0.98, 0.98, res_text,
-            transform=self.ax.transAxes,
-            color='#AABBDD',
-            fontsize=10,
-            ha='right',
-            va='top',
-            bbox=dict(
-                boxstyle='round,pad=0.2',
-                facecolor='#101025',
-                alpha=0.8,
-                edgecolor='#334466'
-            )
-        )
-        
-        # Add SNR text with scientific notation and units
-        self.components['snr_text'] = self.ax.text(
-            0.02, 0.02, 'SNR: N/A',
-            transform=self.ax.transAxes,
-            color='#EEDD66',
-            fontsize=11,
-            bbox=dict(
-                boxstyle='round,pad=0.2',
-                facecolor='#101025',
-                alpha=0.8,
-                edgecolor='#334466'
-            )
-        )
+
         
         # Adjust layout
         self.figure.tight_layout()
@@ -460,16 +424,6 @@ class HeatmapView(QWidget):
                 
             # Update display based on visualization mode - pass optimizer state for contour decisions
             self._update_visualization_mode(data_thresholded, redraw=force_update or self.optimizer.should_redraw())
-            
-            # Update SNR with enhanced scientific formatting
-            if np.max(data_thresholded) > 0:
-                snr_value = np.max(data_thresholded) / max(0.001, self.noise_floor)  # Avoid division by zero
-                snr_db = 10.0 * np.log10(snr_value)
-                if 'snr_text' in self.components:
-                    self.components['snr_text'].set_text(f'SNR: {snr_db:.1f} dB (ratio: {snr_value:.1f})')
-            else:
-                if 'snr_text' in self.components:
-                    self.components['snr_text'].set_text('SNR: N/A')
             
             # Only redraw if necessary according to the optimizer
             if force_update or self.optimizer.should_redraw():
@@ -849,7 +803,7 @@ class HeatmapView(QWidget):
             
             # Get grid parameters
             max_range = self.max_range
-            res = 1.0  # Updated to 1.0m resolution to match grid size
+            res = 0.5  # Updated to 0.5m resolution to match grid size
             grid_size_x, grid_size_y = self.heatmap_data.shape
             
             # Create coordinate arrays for all grid points
@@ -1023,7 +977,7 @@ class HeatmapView(QWidget):
     
     def reset_heatmap(self):
         """Reset the heatmap to initial state."""
-        grid_size = int(2 * self.max_range / 1.0)  # Lower resolution: 1.0m instead of 0.5m
+        grid_size = int(2 * self.max_range / 0.5)  # Higher resolution: 0.5m instead of 1.0m
         # Ensure grid size is even for better memory alignment
         if grid_size % 2 == 1:
             grid_size += 1

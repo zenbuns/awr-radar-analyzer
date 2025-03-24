@@ -69,11 +69,25 @@ class ApplicationStateManager:
             self.control_panel.start_button.setEnabled(not self.states['collecting'])
             self.control_panel.stop_button.setEnabled(self.states['collecting'])
             
+            # Update ROS2 bag group title and status label
+            if hasattr(self.control_panel, 'rosbag_group'):
+                self.control_panel.rosbag_group.setTitle("ROS2 Bag Controls - Collecting")
+            if hasattr(self.control_panel, 'recording_status_label'):
+                self.control_panel.recording_status_label.setText("Collecting Data")
+                self.control_panel.recording_status_label.setStyleSheet("font-weight: bold; color: #757575;")
+            
         elif action == 'stop_collection':
             self.states['collecting'] = False
             # Update UI based on new state
             self.control_panel.start_button.setEnabled(True)
             self.control_panel.stop_button.setEnabled(False)
+            
+            # Reset ROS2 bag group title if not collecting
+            if not self.states['collecting'] and hasattr(self.control_panel, 'rosbag_group'):
+                self.control_panel.rosbag_group.setTitle("ROS2 Bag Controls")
+            if hasattr(self.control_panel, 'recording_status_label'):
+                self.control_panel.recording_status_label.setText("Collect Settings")
+                self.control_panel.recording_status_label.setStyleSheet("font-weight: bold; color: #757575;")
             
         elif action == 'start_playback':
             if success:
@@ -83,6 +97,13 @@ class ApplicationStateManager:
             self.control_panel.stop_playback_button.setEnabled(self.states['playing_bag'])
             self.control_panel.timeline_slider.setEnabled(self.states['playing_bag'])
             
+            # Update ROS2 bag group title and status label
+            if hasattr(self.control_panel, 'rosbag_group'):
+                self.control_panel.rosbag_group.setTitle("ROS2 Bag Controls - Playing")
+            if hasattr(self.control_panel, 'recording_status_label'):
+                self.control_panel.recording_status_label.setText("Record Settings")
+                self.control_panel.recording_status_label.setStyleSheet("font-weight: bold; color: #757575;")
+            
         elif action == 'stop_playback':
             self.states['playing_bag'] = False
             # Update UI based on new state
@@ -91,6 +112,13 @@ class ApplicationStateManager:
             self.control_panel.timeline_slider.setEnabled(False)
             self.control_panel.timeline_slider.setValue(0)
             
+            # Reset ROS2 bag group title if not recording
+            if not self.states['recording_bag'] and hasattr(self.control_panel, 'rosbag_group'):
+                self.control_panel.rosbag_group.setTitle("ROS2 Bag Controls")
+            if hasattr(self.control_panel, 'recording_status_label'):
+                self.control_panel.recording_status_label.setText("Record Settings")
+                self.control_panel.recording_status_label.setStyleSheet("font-weight: bold; color: #757575;")
+            
         elif action == 'start_recording':
             if success:
                 self.states['recording_bag'] = True
@@ -98,11 +126,25 @@ class ApplicationStateManager:
             self.control_panel.record_button.setEnabled(not self.states['recording_bag'])
             self.control_panel.stop_record_button.setEnabled(self.states['recording_bag'])
             
+            # Update ROS2 bag group title and status label
+            if hasattr(self.control_panel, 'rosbag_group'):
+                self.control_panel.rosbag_group.setTitle("ROS2 Bag Controls - Recording")
+            if hasattr(self.control_panel, 'recording_status_label'):
+                self.control_panel.recording_status_label.setText("Recording in Progress")
+                self.control_panel.recording_status_label.setStyleSheet("font-weight: bold; color: #F44336;")
+            
         elif action == 'stop_recording':
             self.states['recording_bag'] = False
             # Update UI based on new state
             self.control_panel.record_button.setEnabled(True)
             self.control_panel.stop_record_button.setEnabled(False)
+            
+            # Reset ROS2 bag group title if not playing
+            if not self.states['playing_bag'] and hasattr(self.control_panel, 'rosbag_group'):
+                self.control_panel.rosbag_group.setTitle("ROS2 Bag Controls")
+            if hasattr(self.control_panel, 'recording_status_label'):
+                self.control_panel.recording_status_label.setText("Record Settings")
+                self.control_panel.recording_status_label.setStyleSheet("font-weight: bold; color: #757575;")
             
         elif action == 'start_generating_report':
             if success:

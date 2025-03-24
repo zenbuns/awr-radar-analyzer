@@ -15,7 +15,7 @@ from PyQt5.QtWidgets import (
     QAction, QMenu, QToolBar, QStatusBar, QFileDialog, QMessageBox,
     QLabel, QFrame, QPushButton, QSizePolicy, QApplication, QProgressDialog,
     QProgressBar, QTabWidget, QMenuBar, QGroupBox, QRadioButton, QButtonGroup,
-    QInputDialog, QCheckBox
+    QInputDialog, QCheckBox, QDialog
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSlot, QSize, QUrl, QThread, pyqtSignal, QObject
 from PyQt5.QtGui import QIcon, QPixmap, QFont, QDesktopServices
@@ -820,39 +820,71 @@ class MainWindow(QMainWindow):
             os.makedirs(data_dir, exist_ok=True)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             
-            # Save heatmap data as NumPy array
-            heatmap_file = os.path.join(data_dir, f"live_heatmap_{timestamp}.npz")
-            np.savez_compressed(heatmap_file, data=self.analyzer.live_heatmap_data)
+            # Generate default filename
+            default_filename = f"live_heatmap_{timestamp}.png"
+            default_path = os.path.join(data_dir, default_filename)
             
-            # Save heatmap visualization as PNG
-            viz_file = os.path.join(data_dir, f"live_heatmap_viz_{timestamp}.png")
-            self.heatmap_view.figure.savefig(
-                viz_file,
-                dpi=300,
-                bbox_inches='tight',
-                facecolor=self.heatmap_view.figure.get_facecolor()
-            )
+            # Create a non-blocking file dialog
+            options = QFileDialog.Options()
+            options |= QFileDialog.DontUseNativeDialog  # Use Qt's dialog instead of native for better control
             
-            self.status_bar.showMessage(f"Saved heatmap to {os.path.basename(viz_file)}")
+            dialog = QFileDialog(self, "Save Heatmap Image", default_path, 
+                                "Image files (*.png *.jpg);;All Files (*)")
+            dialog.setAcceptMode(QFileDialog.AcceptSave)
+            dialog.setDefaultSuffix("png")
+            dialog.setOptions(options)
+            dialog.setWindowModality(Qt.WindowModal)  # Make dialog modal to main window only
             
-            # Ask if user wants to view the saved file
-            reply = QMessageBox.question(
-                self, "Save Complete",
-                f"Heatmap saved to:\n{viz_file}\n\nWould you like to open it?",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No
-            )
+            # Process events before showing dialog to keep UI responsive
+            QApplication.processEvents()
             
-            if reply == QMessageBox.Yes:
-                # Open file with default system application
-                import subprocess
-                import sys
-                if sys.platform == 'win32':
-                    os.startfile(viz_file)
-                elif sys.platform == 'darwin':  # macOS
-                    subprocess.call(['open', viz_file])
-                else:  # Linux
-                    subprocess.call(['xdg-open', viz_file])
-        
+            # Show dialog and wait for result
+            if dialog.exec_() == QDialog.Accepted:
+                selected_files = dialog.selectedFiles()
+                if selected_files:
+                    viz_file = selected_files[0]
+                    
+                    # Show progress message
+                    self.status_bar.showMessage("Saving heatmap...")
+                    QApplication.processEvents()  # Process events to update UI
+                    
+                    # Save heatmap data as NumPy array (in the background)
+                    heatmap_data_file = os.path.splitext(viz_file)[0] + ".npz"
+                    np.savez_compressed(heatmap_data_file, data=self.analyzer.live_heatmap_data)
+                    
+                    # Save heatmap visualization as PNG
+                    self.heatmap_view.figure.savefig(
+                        viz_file,
+                        dpi=300,
+                        bbox_inches='tight',
+                        facecolor=self.heatmap_view.figure.get_facecolor()
+                    )
+                    
+                    self.status_bar.showMessage(f"Saved heatmap to {os.path.basename(viz_file)}")
+                    
+                    # Ask if user wants to view the saved file - make this non-blocking too
+                    msgBox = QMessageBox(self)
+                    msgBox.setWindowTitle("Save Complete")
+                    msgBox.setText(f"Heatmap saved to:\n{viz_file}")
+                    msgBox.setInformativeText("Would you like to open it?")
+                    msgBox.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+                    msgBox.setDefaultButton(QMessageBox.No)
+                    msgBox.setWindowModality(Qt.WindowModal)  # Modal to main window only
+                    
+                    # Process events before showing message box
+                    QApplication.processEvents()
+                    
+                    if msgBox.exec_() == QMessageBox.Yes:
+                        # Open file with default system application
+                        import subprocess
+                        import sys
+                        if sys.platform == 'win32':
+                            os.startfile(viz_file)
+                        elif sys.platform == 'darwin':  # macOS
+                            subprocess.call(['open', viz_file])
+                        else:  # Linux
+                            subprocess.call(['xdg-open', viz_file])
+    
         except Exception as e:
             self.status_bar.showMessage(f"Error saving heatmap: {str(e)}")
             QMessageBox.critical(self, "Save Error", f"Failed to save heatmap: {str(e)}")
@@ -889,235 +921,209 @@ class MainWindow(QMainWindow):
             default_filename = f"radar_plot_{config_name}_{timestamp}.png"
             default_path = os.path.join(export_dir, default_filename)
             
-            # Use a single file dialog with a simpler approach
-            try:
-                # Disable complex dialog options to prevent hangs
-                options = QFileDialog.Options()
-                options |= QFileDialog.DontUseNativeDialog  # Use Qt's dialog, not the OS native one
+            # Use a non-blocking file dialog approach
+            dialog = QFileDialog(self, "Save Scientific Plot", default_path)
+            dialog.setAcceptMode(QFileDialog.AcceptSave)
+            dialog.setNameFilter("PNG Image (*.png);;PDF Document (*.pdf);;SVG Image (*.svg)")
+            dialog.setDefaultSuffix("png")
+            dialog.setOption(QFileDialog.DontUseNativeDialog, True)  # Use Qt's dialog instead of native for better control
+            dialog.setWindowModality(Qt.WindowModal)  # Make dialog modal to main window only
+            
+            # Process events to keep UI responsive
+            QApplication.processEvents()
+            
+            # Show dialog and wait for result
+            if dialog.exec_() == QDialog.Accepted:
+                selected_files = dialog.selectedFiles()
+                if not selected_files:
+                    # User canceled or no file selected
+                    if hasattr(self.control_panel, 'state_manager'):
+                        self.control_panel.state_manager.transition('unlock_ui')
+                    return
+                    
+                file_path = selected_files[0]
                 
-                file_path, _ = QFileDialog.getSaveFileName(
-                    self,
-                    "Save Scientific Plot",
-                    default_path,
-                    "PNG Image (*.png);;PDF Document (*.pdf);;SVG Image (*.svg)",
-                    options=options
-                )
-            except Exception as dialog_error:
-                print(f"Error with file dialog: {dialog_error}")
-                # Fallback to a default path if the dialog fails
-                file_path = default_path
-                QMessageBox.warning(
-                    self,
-                    "Dialog Error",
-                    f"File dialog failed. Will save to:\n{file_path}"
-                )
-            
-            # User canceled the dialog or path is invalid
-            if not file_path:
-                # Unlock the UI and return
-                if hasattr(self.control_panel, 'state_manager'):
-                    self.control_panel.state_manager.transition('unlock_ui')
-                return
-            
-            # Ensure the directory exists for the selected file
-            try:
-                os.makedirs(os.path.dirname(file_path), exist_ok=True)
-            except Exception as dir_error:
-                print(f"Error creating directory for file: {dir_error}")
-                # Try to use the default path instead
-                file_path = default_path
-                QMessageBox.warning(
-                    self,
-                    "Directory Error",
-                    f"Could not create directory. Will save to:\n{file_path}"
-                )
-            
-            # Save the directory for next time if needed
-            if hasattr(self.control_panel, 'save_last_used_directory'):
+                # Save the directory for next time if needed
+                if hasattr(self.control_panel, 'save_last_used_directory'):
+                    try:
+                        self.control_panel.save_last_used_directory(os.path.dirname(file_path))
+                    except Exception as e:
+                        print(f"Error saving last used directory: {e}")
+                
+                # Update status message
+                self.status_bar.showMessage("Preparing to export plot...")
+                QApplication.processEvents()  # Force UI update
+                
+                # Get visualization parameters with defaults and error handling
                 try:
-                    self.control_panel.save_last_used_directory(os.path.dirname(file_path))
-                except Exception as e:
-                    print(f"Error saving last used directory: {e}")
-            
-            # Update status message
-            self.status_bar.showMessage("Preparing to export plot...")
-            QApplication.processEvents()  # Force UI update
-            
-            # Get visualization parameters with defaults and error handling
-            try:
-                # Get colormap
-                colormap = "viridis"  # Default
-                if hasattr(self.control_panel, 'colormap_combo'):
-                    colormap = self.control_panel.colormap_combo.currentText()
+                    # Get colormap
+                    colormap = "viridis"  # Default
+                    if hasattr(self.control_panel, 'colormap_combo'):
+                        colormap = self.control_panel.colormap_combo.currentText()
+                    
+                    # Get visualization mode
+                    visualization_mode = "heatmap"  # Default
+                    if hasattr(self.control_panel, 'vis_mode_group'):
+                        for button in self.control_panel.vis_mode_group.buttons():
+                            if button.isChecked():
+                                mode_text = button.text().lower()
+                                if mode_text == "heat":
+                                    visualization_mode = "heatmap"
+                                elif mode_text == "contour":
+                                    visualization_mode = "contour"
+                                elif mode_text == "combined":
+                                    visualization_mode = "combined"
+                                break
+                    
+                    # Get noise floor and smoothing parameters
+                    noise_floor = 0.1  # Default
+                    smoothing_sigma = 1.0  # Default
+                    
+                    if hasattr(self.control_panel, 'noise_value'):
+                        try:
+                            noise_floor = float(self.control_panel.noise_value.text())
+                        except (ValueError, AttributeError):
+                            print("Error parsing noise floor, using default")
+                            
+                    if hasattr(self.control_panel, 'smooth_value'):
+                        try:
+                            smoothing_sigma = float(self.control_panel.smooth_value.text())
+                        except (ValueError, AttributeError):
+                            print("Error parsing smoothing value, using default")
+                except Exception as param_error:
+                    print(f"Error getting parameters: {param_error}")
+                    # Continue with defaults if there was an error
                 
-                # Get visualization mode
-                visualization_mode = "heatmap"  # Default
-                if hasattr(self.control_panel, 'vis_mode_group'):
-                    for button in self.control_panel.vis_mode_group.buttons():
-                        if button.isChecked():
-                            mode_text = button.text().lower()
-                            if mode_text == "heat":
-                                visualization_mode = "heatmap"
-                            elif mode_text == "contour":
-                                visualization_mode = "contour"
-                            elif mode_text == "combined":
-                                visualization_mode = "combined"
-                            break
+                # Create a progress dialog to show export progress
+                self.progress_dialog = QProgressDialog("Initializing export...", "Cancel", 0, 100, self)
+                self.progress_dialog.setWindowTitle("Exporting Plot")
+                self.progress_dialog.setWindowModality(Qt.WindowModal)
+                self.progress_dialog.setMinimumDuration(0)  # Show immediately
+                self.progress_dialog.setValue(0)
+                self.progress_dialog.setAutoClose(False)
+                self.progress_dialog.setAutoReset(False)
                 
-                # Get noise floor and smoothing parameters
-                noise_floor = 0.1  # Default
-                smoothing_sigma = 1.0  # Default
+                # Connect cancel signal to handler
+                cancel_button = self.progress_dialog.findChild(QPushButton)
+                if cancel_button:
+                    cancel_button.clicked.disconnect()  # Disconnect default behavior
+                    cancel_button.clicked.connect(self.cancel_export)
                 
-                if hasattr(self.control_panel, 'noise_value'):
-                    try:
-                        noise_floor = float(self.control_panel.noise_value.text())
-                    except (ValueError, AttributeError):
-                        print("Error parsing noise floor, using default")
-                        
-                if hasattr(self.control_panel, 'smooth_value'):
-                    try:
-                        smoothing_sigma = float(self.control_panel.smooth_value.text())
-                    except (ValueError, AttributeError):
-                        print("Error parsing smoothing value, using default")
-            except Exception as param_error:
-                print(f"Error getting parameters: {param_error}")
-                # Continue with defaults if there was an error
-            
-            # Create a progress dialog to show export progress
-            self.progress_dialog = QProgressDialog("Initializing export...", "Cancel", 0, 100, self)
-            self.progress_dialog.setWindowTitle("Exporting Plot")
-            self.progress_dialog.setWindowModality(Qt.WindowModal)
-            self.progress_dialog.setMinimumDuration(0)  # Show immediately
-            self.progress_dialog.setValue(0)
-            self.progress_dialog.setAutoClose(False)
-            self.progress_dialog.setAutoReset(False)
-            
-            # Connect cancel signal to handler
-            cancel_button = self.progress_dialog.findChild(QPushButton)
-            if cancel_button:
-                cancel_button.clicked.disconnect()  # Disconnect default behavior
-                cancel_button.clicked.connect(self.cancel_export)
-            
-            # Show the progress dialog
-            self.progress_dialog.show()
-            QApplication.processEvents()  # Force UI update
-            
-            # Clone the heatmap data to avoid threading issues
-            try:
-                heatmap_data_copy = None
-                if self.analyzer.live_heatmap_data is not None:
-                    # Make a copy but handle potential memory issues
-                    heatmap_data_copy = self.analyzer.live_heatmap_data.copy()
+                # Show the progress dialog
+                self.progress_dialog.show()
+                QApplication.processEvents()  # Force UI update
                 
-                if heatmap_data_copy is None or heatmap_data_copy.size == 0:
-                    QMessageBox.warning(self, "No Data", "Heatmap data is empty. Export may not succeed.")
-            except Exception as data_error:
-                print(f"Error copying heatmap data: {data_error}")
-                QMessageBox.critical(
-                    self, 
-                    "Data Error", 
-                    "Failed to copy heatmap data for export. Try reducing heatmap resolution."
-                )
+                # Clone the heatmap data to avoid threading issues
+                try:
+                    heatmap_data_copy = None
+                    if self.analyzer.live_heatmap_data is not None:
+                        # Make a copy but handle potential memory issues
+                        heatmap_data_copy = self.analyzer.live_heatmap_data.copy()
+                    
+                    if heatmap_data_copy is None or heatmap_data_copy.size == 0:
+                        QMessageBox.warning(self, "No Data", "Heatmap data is empty. Export may not succeed.")
+                except Exception as data_error:
+                    print(f"Error copying heatmap data: {data_error}")
+                    QMessageBox.critical(
+                        self, 
+                        "Data Error", 
+                        "Failed to copy heatmap data for export. Try reducing heatmap resolution."
+                    )
+                    
+                    # Cleanup and return
+                    if hasattr(self, 'progress_dialog') and self.progress_dialog:
+                        self.progress_dialog.close()
+                    if hasattr(self.control_panel, 'state_manager'):
+                        self.control_panel.state_manager.transition('unlock_ui')
+                    return
                 
-                # Cleanup and return
-                if hasattr(self, 'progress_dialog') and self.progress_dialog:
-                    self.progress_dialog.close()
+                # Prepare parameters for the export thread
+                try:
+                    export_params = {
+                        'max_range': self.analyzer.params.max_range,
+                        'target_distance': self.analyzer.params.target_distance,
+                        'circle_distance': self.analyzer.params.circle_distance,
+                        'circle_radius': self.analyzer.params.circle_radius,
+                        'circle_interval': self.analyzer.params.circle_interval,
+                        'config_name': config_name,
+                        'noise_floor': noise_floor,
+                        'smoothing_sigma': smoothing_sigma,
+                        'colormap': colormap,
+                        'visualization_mode': visualization_mode
+                    }
+                except Exception as param_error:
+                    print(f"Error preparing export parameters: {param_error}")
+                    QMessageBox.critical(self, "Parameter Error", f"Failed to prepare export parameters: {param_error}")
+                    
+                    # Cleanup and return
+                    if hasattr(self, 'progress_dialog') and self.progress_dialog:
+                        self.progress_dialog.close()
+                    if hasattr(self.control_panel, 'state_manager'):
+                        self.control_panel.state_manager.transition('unlock_ui')
+                    return
+                
+                # Create worker object and thread
+                try:
+                    self.export_thread = QThread()
+                    self.export_worker = self.ExportWorker(file_path, heatmap_data_copy, export_params)
+                    self.export_worker.moveToThread(self.export_thread)
+                    
+                    # Connect signals
+                    self.export_thread.started.connect(self.export_worker.run)
+                    self.export_worker.progress.connect(self.update_export_progress)
+                    self.export_worker.finished.connect(self.on_export_completed)
+                    self.export_worker.finished.connect(self.export_thread.quit)
+                    self.export_thread.finished.connect(self.cleanup_export_thread)
+                except Exception as thread_error:
+                    print(f"Error setting up export thread: {thread_error}")
+                    QMessageBox.critical(self, "Thread Error", f"Failed to set up export thread: {thread_error}")
+                    
+                    # Cleanup and return
+                    if hasattr(self, 'progress_dialog') and self.progress_dialog:
+                        self.progress_dialog.close()
+                    if hasattr(self.control_panel, 'state_manager'):
+                        self.control_panel.state_manager.transition('unlock_ui')
+                    return
+                
+                # Set a timeout timer
+                try:
+                    self.export_timeout_timer = QTimer(self)
+                    self.export_timeout_timer.setSingleShot(True)
+                    self.export_timeout_timer.timeout.connect(self.check_export_timeout)
+                    self.export_timeout_timer.start(20000)  # 20 second timeout - reduced from 30
+                except Exception as timer_error:
+                    print(f"Error setting up timeout timer: {timer_error}")
+                    # Continue without the timer if it fails
+                
+                # Start the thread
+                try:
+                    self.export_thread.start()
+                    self.status_bar.showMessage("Export thread started...")
+                except Exception as start_error:
+                    print(f"Error starting export thread: {start_error}")
+                    QMessageBox.critical(self, "Thread Error", f"Failed to start export thread: {start_error}")
+                    
+                    # Cleanup and return
+                    if hasattr(self, 'progress_dialog') and self.progress_dialog:
+                        self.progress_dialog.close()
+                    if hasattr(self.control_panel, 'state_manager'):
+                        self.control_panel.state_manager.transition('unlock_ui')
+                    if hasattr(self, 'export_worker'):
+                        self.export_worker.deleteLater()
+                    if hasattr(self, 'export_thread'):
+                        self.export_thread.deleteLater()
+                    return
+            else:
+                # Dialog was canceled
                 if hasattr(self.control_panel, 'state_manager'):
                     self.control_panel.state_manager.transition('unlock_ui')
-                return
-            
-            # Prepare parameters for the export thread
-            try:
-                export_params = {
-                    'max_range': self.analyzer.params.max_range,
-                    'target_distance': self.analyzer.params.target_distance,
-                    'circle_distance': self.analyzer.params.circle_distance,
-                    'circle_radius': self.analyzer.params.circle_radius,
-                    'circle_interval': self.analyzer.params.circle_interval,
-                    'config_name': config_name,
-                    'noise_floor': noise_floor,
-                    'smoothing_sigma': smoothing_sigma,
-                    'colormap': colormap,
-                    'visualization_mode': visualization_mode
-                }
-            except Exception as param_error:
-                print(f"Error preparing export parameters: {param_error}")
-                QMessageBox.critical(self, "Parameter Error", f"Failed to prepare export parameters: {param_error}")
-                
-                # Cleanup and return
-                if hasattr(self, 'progress_dialog') and self.progress_dialog:
-                    self.progress_dialog.close()
-                if hasattr(self.control_panel, 'state_manager'):
-                    self.control_panel.state_manager.transition('unlock_ui')
-                return
-            
-            # Create worker object and thread
-            try:
-                self.export_thread = QThread()
-                self.export_worker = self.ExportWorker(file_path, heatmap_data_copy, export_params)
-                self.export_worker.moveToThread(self.export_thread)
-                
-                # Connect signals
-                self.export_thread.started.connect(self.export_worker.run)
-                self.export_worker.progress.connect(self.update_export_progress)
-                self.export_worker.finished.connect(self.on_export_completed)
-                self.export_worker.finished.connect(self.export_thread.quit)
-                self.export_thread.finished.connect(self.cleanup_export_thread)
-            except Exception as thread_error:
-                print(f"Error setting up export thread: {thread_error}")
-                QMessageBox.critical(self, "Thread Error", f"Failed to set up export thread: {thread_error}")
-                
-                # Cleanup and return
-                if hasattr(self, 'progress_dialog') and self.progress_dialog:
-                    self.progress_dialog.close()
-                if hasattr(self.control_panel, 'state_manager'):
-                    self.control_panel.state_manager.transition('unlock_ui')
-                return
-            
-            # Set a timeout timer
-            try:
-                self.export_timeout_timer = QTimer(self)
-                self.export_timeout_timer.setSingleShot(True)
-                self.export_timeout_timer.timeout.connect(self.check_export_timeout)
-                self.export_timeout_timer.start(20000)  # 20 second timeout - reduced from 30
-            except Exception as timer_error:
-                print(f"Error setting up timeout timer: {timer_error}")
-                # Continue without the timer if it fails
-            
-            # Start the thread
-            try:
-                self.export_thread.start()
-                self.status_bar.showMessage("Export thread started...")
-            except Exception as start_error:
-                print(f"Error starting export thread: {start_error}")
-                QMessageBox.critical(self, "Thread Error", f"Failed to start export thread: {start_error}")
-                
-                # Cleanup and return
-                if hasattr(self, 'progress_dialog') and self.progress_dialog:
-                    self.progress_dialog.close()
-                if hasattr(self.control_panel, 'state_manager'):
-                    self.control_panel.state_manager.transition('unlock_ui')
-                if hasattr(self, 'export_worker'):
-                    self.export_worker.deleteLater()
-                if hasattr(self, 'export_thread'):
-                    self.export_thread.deleteLater()
-                return
-            
         except Exception as e:
-            print(f"Error in export_scientific_plot: {e}")
-            import traceback
-            traceback.print_exc()
-            
             self.status_bar.showMessage(f"Error exporting plot: {str(e)}")
             QMessageBox.critical(self, "Export Error", f"Failed to export plot: {str(e)}")
             
-            # Ensure UI is unlocked in case of error
+            # Ensure UI is unlocked
             if hasattr(self.control_panel, 'state_manager'):
                 self.control_panel.state_manager.transition('unlock_ui')
-            
-            # Close progress dialog if it exists
-            if hasattr(self, 'progress_dialog') and self.progress_dialog:
-                self.progress_dialog.close()
     
     # Worker class inside the MainWindow class
     class ExportWorker(QObject):
@@ -2294,8 +2300,8 @@ class MainWindow(QMainWindow):
                 # Connect the signal
                 self.analyzer.signals.update_playback_position_signal.connect(self.update_playback_position)
             
-            # Call analyzer method to play the bag file
-            self.analyzer.play_rosbag(bag_path)
+            # Call analyzer method to play the bag file with explicit loop=False
+            self.analyzer.play_rosbag(bag_path, loop=False)
             self.status_bar.showMessage(f"Playing ROS2 bag: {bag_path}")
         except Exception as e:
             QMessageBox.critical(self, "Playback Error", f"Failed to play ROS2 bag: {str(e)}")
@@ -2388,11 +2394,16 @@ class MainWindow(QMainWindow):
                     current_time = time.time()
                     elapsed = current_time - self._last_position_time
                     
-                    # Only update at most 30 times per second for smoother appearance
-                    if elapsed >= 1.0 / 30.0:
-                        # Calculate how much to move toward the target position
-                        # Higher smoothing factor = faster movement
-                        smoothing_factor = min(elapsed * 5.0, 1.0)  # Adjust smoothing based on time passed
+                    # Update at 60fps for smoother appearance (twice the previous rate)
+                    if elapsed >= 1.0 / 60.0:
+                        # Use a fixed smoothing factor for more consistent movement
+                        # Lower value = smoother but slower response, higher value = faster but potentially jerkier
+                        smoothing_factor = 0.25  # Fixed smoothing factor for consistent movement
+                        
+                        # Handle large jumps more smoothly
+                        position_diff = abs(self._target_position - self._last_position)
+                        if position_diff > 0.05:  # If position change is significant (>5%)
+                            smoothing_factor = 0.4  # Faster response for big jumps
                         
                         # Interpolate between current and target position
                         new_position = self._last_position + (self._target_position - self._last_position) * smoothing_factor
@@ -2617,52 +2628,118 @@ class MainWindow(QMainWindow):
     
     def open_data_file(self):
         """Open a saved radar data file."""
-        options = QFileDialog.Options()
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "Open Radar Data", "", 
-            "Radar Data Files (*.dat);;CSV Files (*.csv);;All Files (*)",
-            options=options
-        )
+        # Get default directory from last used directory if available
+        default_dir = os.path.expanduser("~")
+        if hasattr(self.control_panel, 'last_used_directory'):
+            last_dir = self.control_panel.last_used_directory()
+            if last_dir and os.path.exists(last_dir):
+                default_dir = last_dir
         
-        if file_path:
-            if hasattr(self, 'analyzer') and self.analyzer is not None:
-                try:
-                    # Use the analyzer to load the data
-                    success = self.analyzer.load_data_from_file(file_path)
-                    
-                    if success:
-                        self.status_bar.showMessage(f"Loaded data from {file_path}", 3000)
-                        self.update_visualizations()
-                    else:
-                        QMessageBox.warning(self, "Error", "Failed to load data file.")
-                except Exception as e:
-                    QMessageBox.critical(self, "Error", f"Error loading data: {str(e)}")
-            else:
-                QMessageBox.warning(self, "Error", "Analyzer not initialized.")
-    
+        # Create a non-blocking file dialog
+        dialog = QFileDialog(self, "Open Radar Data", default_dir)
+        dialog.setFileMode(QFileDialog.ExistingFile)
+        dialog.setNameFilter("Radar Data Files (*.dat);;CSV Files (*.csv);;All Files (*)")
+        dialog.setViewMode(QFileDialog.Detail)
+        dialog.setOption(QFileDialog.DontUseNativeDialog, True)  # Use Qt's dialog for better control
+        dialog.setWindowModality(Qt.WindowModal)  # Make dialog modal to main window only
+        
+        # Process events to keep UI responsive
+        QApplication.processEvents()
+        
+        # Show dialog and process result
+        if dialog.exec_() == QDialog.Accepted:
+            selected_files = dialog.selectedFiles()
+            if selected_files and selected_files[0]:
+                file_path = selected_files[0]
+                
+                # Save the last used directory if available
+                if hasattr(self.control_panel, 'save_last_used_directory'):
+                    try:
+                        self.control_panel.save_last_used_directory(os.path.dirname(file_path))
+                    except Exception as e:
+                        print(f"Error saving last used directory: {e}")
+                
+                # Load the data file
+                if hasattr(self, 'analyzer') and self.analyzer is not None:
+                    try:
+                        # Use a status message to indicate loading
+                        self.status_bar.showMessage(f"Loading data from {os.path.basename(file_path)}...")
+                        QApplication.processEvents()  # Force UI update
+                        
+                        # Use the analyzer to load the data
+                        success = self.analyzer.load_data_from_file(file_path)
+                        
+                        if success:
+                            self.status_bar.showMessage(f"Loaded data from {os.path.basename(file_path)}", 3000)
+                            self.update_visualizations()
+                        else:
+                            QMessageBox.warning(self, "Error", "Failed to load data file.")
+                    except Exception as e:
+                        QMessageBox.critical(self, "Error", f"Error loading data: {str(e)}")
+                else:
+                    QMessageBox.warning(self, "Error", "Analyzer not initialized.")
+
     def save_data_file(self):
         """Save radar data to a file."""
-        options = QFileDialog.Options()
-        file_path, _ = QFileDialog.getSaveFileName(
-            self, "Save Radar Data", "", 
-            "Radar Data Files (*.dat);;CSV Files (*.csv);;All Files (*)",
-            options=options
-        )
+        # Check if we have data to save
+        if not hasattr(self, 'analyzer') or self.analyzer is None or not hasattr(self.analyzer, 'live_heatmap_data') or self.analyzer.live_heatmap_data is None:
+            QMessageBox.warning(self, "No Data", "No radar data available to save.")
+            return
         
-        if file_path:
-            if hasattr(self, 'analyzer') and self.analyzer is not None:
-                try:
-                    # Use the analyzer to save the data
-                    success = self.analyzer.save_data_to_file(file_path)
-                    
-                    if success:
-                        self.status_bar.showMessage(f"Saved data to {file_path}", 3000)
-                    else:
-                        QMessageBox.warning(self, "Error", "Failed to save data file.")
-                except Exception as e:
-                    QMessageBox.critical(self, "Error", f"Error saving data: {str(e)}")
-            else:
-                QMessageBox.warning(self, "Error", "Analyzer not initialized or no data to save.")
+        # Get default directory and filename
+        default_dir = os.path.expanduser("~")
+        if hasattr(self.control_panel, 'last_used_directory'):
+            last_dir = self.control_panel.last_used_directory()
+            if last_dir and os.path.exists(last_dir):
+                default_dir = last_dir
+        
+        # Generate default filename with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_filename = f"radar_data_{timestamp}.dat"
+        default_path = os.path.join(default_dir, default_filename)
+        
+        # Create a non-blocking file dialog
+        dialog = QFileDialog(self, "Save Radar Data", default_path)
+        dialog.setAcceptMode(QFileDialog.AcceptSave)
+        dialog.setNameFilter("Radar Data Files (*.dat);;CSV Files (*.csv);;All Files (*)")
+        dialog.setDefaultSuffix("dat")
+        dialog.setOption(QFileDialog.DontUseNativeDialog, True)  # Use Qt's dialog for better control
+        dialog.setWindowModality(Qt.WindowModal)  # Make dialog modal to main window only
+        
+        # Process events to keep UI responsive
+        QApplication.processEvents()
+        
+        # Show dialog and process result
+        if dialog.exec_() == QDialog.Accepted:
+            selected_files = dialog.selectedFiles()
+            if selected_files and selected_files[0]:
+                file_path = selected_files[0]
+                
+                # Save the last used directory if available
+                if hasattr(self.control_panel, 'save_last_used_directory'):
+                    try:
+                        self.control_panel.save_last_used_directory(os.path.dirname(file_path))
+                    except Exception as e:
+                        print(f"Error saving last used directory: {e}")
+                
+                # Save the data file
+                if hasattr(self, 'analyzer') and self.analyzer is not None:
+                    try:
+                        # Use a status message to indicate saving
+                        self.status_bar.showMessage(f"Saving data to {os.path.basename(file_path)}...")
+                        QApplication.processEvents()  # Force UI update
+                        
+                        # Use the analyzer to save the data
+                        success = self.analyzer.save_data_to_file(file_path)
+                        
+                        if success:
+                            self.status_bar.showMessage(f"Saved data to {os.path.basename(file_path)}", 3000)
+                        else:
+                            QMessageBox.warning(self, "Error", "Failed to save data file.")
+                    except Exception as e:
+                        QMessageBox.critical(self, "Error", f"Error saving data: {str(e)}")
+                else:
+                    QMessageBox.warning(self, "Error", "Analyzer not initialized.")
     
     def on_distance_calculation_changed(self, checked):
         """Handle change in distance calculation method radio button."""

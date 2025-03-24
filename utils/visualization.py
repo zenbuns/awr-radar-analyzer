@@ -332,25 +332,6 @@ def setup_heatmap_figure(
     for spine in ax.spines.values():
         spine.set_edgecolor('white')
     
-    # Add SNR text
-    if np.max(data_thresholded) > 0:
-        snr = 10.0 * np.log10(np.max(data_thresholded) / noise_floor)
-        snr_text = f'SNR: {snr:.1f} dB'
-    else:
-        snr_text = 'SNR: N/A'
-        
-    components['snr_text'] = ax.text(
-        0.02, 0.02, snr_text,
-        transform=ax.transAxes,
-        color='yellow',
-        fontsize=10,
-        bbox=dict(
-            boxstyle='round',
-            facecolor='black',
-            alpha=0.7
-        )
-    )
-    
     fig.tight_layout()
     return fig, ax, components
 

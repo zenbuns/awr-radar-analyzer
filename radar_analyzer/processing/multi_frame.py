@@ -520,6 +520,14 @@ def load_latest_multi_frame_metrics(analyzer) -> bool:
     try:
         import glob
         import json
+        import time
+        
+        # Check if we have recent metrics already cached to avoid excessive file scanning
+        if hasattr(analyzer, 'last_metrics_scan_time') and hasattr(analyzer, 'multi_frame_metrics'):
+            # Only rescan every 10 seconds
+            if (time.time() - analyzer.last_metrics_scan_time) < 10.0:
+                analyzer.get_logger().debug("Using cached metrics (scan interval < 10s)")
+                return bool(analyzer.multi_frame_metrics)
         
         # Find the most recent multi_frame JSON files in all config directories
         data_dir = os.path.expanduser('~/radar_experiment_data')
@@ -542,7 +550,12 @@ def load_latest_multi_frame_metrics(analyzer) -> bool:
         
         if multi_frame_metrics:
             analyzer.multi_frame_metrics = multi_frame_metrics
+            # Store the time we scanned for metrics to avoid doing it too frequently
+            analyzer.last_metrics_scan_time = time.time()
             return True
+        
+        # Store the time we scanned for metrics to avoid doing it too frequently even if empty
+        analyzer.last_metrics_scan_time = time.time()
         return False
         
     except Exception as e:
