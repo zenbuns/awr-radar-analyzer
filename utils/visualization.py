@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Utility functions for radar visualization.
+Visualization utilities for radar data analysis.
 
-This module provides helper functions for creating and customizing
-radar data visualizations using matplotlib.
+This module provides functions for visualizing radar data in various formats,
+including heatmaps, contour plots, scatter plots, and scientific visualization.
 """
 
 import os
 from datetime import datetime
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')  # Force non-interactive backend for thread safety
 import matplotlib.pyplot as plt
 import matplotlib.colors as colors
 import matplotlib.patches as patches
 from matplotlib.figure import Figure
 from matplotlib.axes import Axes
+from scipy.ndimage import gaussian_filter
 from typing import Dict, Tuple, List, Optional, Any
+import gc  # For explicit garbage collection
 
 
 def setup_radar_scatter_figure(
@@ -375,8 +379,6 @@ def add_contours_to_heatmap(
     Returns:
         Contour object added to the axes.
     """
-    from scipy.ndimage import gaussian_filter
-    
     # Apply Gaussian smoothing
     smoothed_data = gaussian_filter(data, sigma=2.0)
     
@@ -423,7 +425,8 @@ def save_scientific_visualization(
     smoothing_sigma=1.0,
     colormap='viridis',
     visualization_mode='heatmap',
-    progress_callback=None
+    progress_callback=None,
+    cancellation_check=None
 ):
     """
     Save a high-quality scientific visualization of radar data.
@@ -442,165 +445,297 @@ def save_scientific_visualization(
         colormap: Colormap name.
         visualization_mode: Mode ('heatmap', 'contour', or 'combined').
         progress_callback: Optional callback function to report progress (0.0-1.0)
+        cancellation_check: Optional callable that returns True if export should be cancelled
     
     Returns:
         None
     """
-    import matplotlib
-    matplotlib.use('Agg')  # Use non-interactive backend
-    import matplotlib.pyplot as plt
-    import numpy as np
-    from scipy.ndimage import gaussian_filter
-    
-    # Report progress (10%)
-    if progress_callback:
-        progress_callback(0.1)
-    
-    # Process heatmap data
-    if heatmap_data is None or np.sum(heatmap_data) == 0:
-        # Create empty heatmap if no data is available
-        grid_size = int(max_range * 2 / 0.5)  # 0.5m resolution
-        heatmap_data = np.zeros((grid_size, grid_size))
-    
-    # Apply smoothing if needed
-    if smoothing_sigma > 0:
-        smoothed_data = gaussian_filter(heatmap_data, sigma=smoothing_sigma)
-    else:
+    try:
+        # Check for cancellation before starting
+        if cancellation_check and cancellation_check():
+            print("Export cancelled before processing")
+            return False
+        
+        # Report progress (5%)
+        if progress_callback:
+            progress_callback(0.05)
+        
+        # Process heatmap data
+        if heatmap_data is None or np.sum(heatmap_data) == 0:
+            # Create empty heatmap if no data is available
+            grid_size = int(max_range * 2 / 0.5)  # 0.5m resolution
+            heatmap_data = np.zeros((grid_size, grid_size))
+        
+        # Check for cancellation
+        if cancellation_check and cancellation_check():
+            print("Export cancelled during data preparation")
+            return False
+        
+        # Report progress (10%)
+        if progress_callback:
+            progress_callback(0.1)
+        
+        # Create a copy of the data to avoid modifying the original
+        # Use contiguous arrays for better performance
         smoothed_data = heatmap_data.copy()
-    
-    # Apply noise floor
-    if noise_floor > 0:
-        max_value = np.max(smoothed_data)
-        smoothed_data[smoothed_data < noise_floor * max_value] = 0
-    
-    # Set up figure with increased size and DPI for publication quality
-    fig, ax = plt.subplots(figsize=(10, 10), dpi=150)
-    
-    # Report progress (20%)
-    if progress_callback:
-        progress_callback(0.2)
-    
-    # Create X, Y meshgrid for heatmap/contour
-    grid_size = smoothed_data.shape[0]
-    extent = [-max_range, max_range, -max_range, max_range]
-    
-    # Draw different visualization types
-    if visualization_mode in ['heatmap', 'combined']:
-        im = ax.imshow(
-            smoothed_data,
-            cmap=colormap,
-            origin='lower',
-            extent=extent,
-            interpolation='bilinear',
-            aspect='equal'
-        )
         
-        # Add colorbar
-        cbar = plt.colorbar(im, ax=ax, pad=0.02)
-        cbar.set_label('Normalized Intensity', rotation=270, labelpad=20)
-    
-    # Report progress (40%)
-    if progress_callback:
-        progress_callback(0.4)
-    
-    if visualization_mode in ['contour', 'combined']:
-        # Create contour lines
-        levels = np.linspace(noise_floor * np.max(smoothed_data), np.max(smoothed_data), 10)
-        contour = ax.contour(
-            smoothed_data,
-            levels=levels,
-            extent=extent,
-            colors='white' if visualization_mode == 'combined' else 'black',
-            alpha=0.7,
-            linewidths=1
-        )
+        # Apply smoothing if needed - this can be computationally expensive
+        if smoothing_sigma > 0:
+            smoothed_data = gaussian_filter(smoothed_data, sigma=smoothing_sigma)
         
-        # Label contours in combined mode with less frequency
-        if visualization_mode == 'contour':
-            ax.clabel(contour, inline=1, fontsize=8, fmt='%.2f')
-    
-    # Report progress (60%)
-    if progress_callback:
-        progress_callback(0.6)
-    
-    # Draw range circles
-    num_circles = int(max_range / circle_interval)
-    for i in range(1, num_circles + 1):
-        radius = i * circle_interval
-        circle = plt.Circle((0, 0), radius, fill=False, color='gray', linestyle='--', alpha=0.5)
-        ax.add_patch(circle)
+        # Apply noise floor
+        if noise_floor > 0:
+            max_value = np.max(smoothed_data)
+            if max_value > 0:  # Avoid division by zero
+                smoothed_data[smoothed_data < noise_floor * max_value] = 0
         
-        # Add range labels
-        ax.text(0, radius, f"{radius}m", ha='center', va='bottom', 
-                bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', boxstyle='round,pad=0.2'))
+        # Check for cancellation after expensive operations
+        if cancellation_check and cancellation_check():
+            print("Export cancelled after data processing")
+            return False
+        
+        # Report progress (20%)
+        if progress_callback:
+            progress_callback(0.2)
+        
+        # Thread-safe figure creation
+        plt.clf()  # Clear any existing figures
+        fig, ax = plt.subplots(figsize=(10, 10), dpi=150)
+        
+        # Create X, Y meshgrid for heatmap/contour
+        grid_size = smoothed_data.shape[0]
+        extent = [-max_range, max_range, -max_range, max_range]
+        
+        # Check for cancellation
+        if cancellation_check and cancellation_check():
+            plt.close(fig)  # Ensure figure is closed to free resources
+            print("Export cancelled before visualization")
+            return False
+        
+        # Report progress (30%)
+        if progress_callback:
+            progress_callback(0.3)
+        
+        # Draw different visualization types
+        if visualization_mode in ['heatmap', 'combined']:
+            try:
+                im = ax.imshow(
+                    smoothed_data,
+                    cmap=colormap,
+                    origin='lower',
+                    extent=extent,
+                    interpolation='bilinear',
+                    aspect='equal'
+                )
+                
+                # Add colorbar
+                cbar = plt.colorbar(im, ax=ax, pad=0.02)
+                cbar.set_label('Normalized Intensity', rotation=270, labelpad=20)
+            except Exception as e:
+                print(f"Error creating heatmap visualization: {e}")
+                plt.close(fig)
+                raise
+        
+        # Check for cancellation
+        if cancellation_check and cancellation_check():
+            plt.close(fig)
+            print("Export cancelled after heatmap creation")
+            return False
+        
+        # Report progress (40%)
+        if progress_callback:
+            progress_callback(0.4)
+        
+        if visualization_mode in ['contour', 'combined']:
+            try:
+                # Create contour lines
+                max_value = np.max(smoothed_data)
+                if max_value > 0:  # Only create contours if we have non-zero data
+                    levels = np.linspace(noise_floor * max_value, max_value, 10)
+                    contour = ax.contour(
+                        smoothed_data,
+                        levels=levels,
+                        extent=extent,
+                        colors='white' if visualization_mode == 'combined' else 'black',
+                        alpha=0.7,
+                        linewidths=1
+                    )
+                    
+                    # Label contours in combined mode with less frequency
+                    if visualization_mode == 'contour':
+                        ax.clabel(contour, inline=1, fontsize=8, fmt='%.2f')
+            except Exception as e:
+                print(f"Error creating contour visualization: {e}")
+                plt.close(fig)
+                raise
+        
+        # Check for cancellation
+        if cancellation_check and cancellation_check():
+            plt.close(fig)
+            print("Export cancelled after contour creation")
+            return False
+        
+        # Report progress (50%)
+        if progress_callback:
+            progress_callback(0.5)
+        
+        try:
+            # Draw range circles - split into chunks to allow cancellation
+            num_circles = int(max_range / circle_interval)
+            circles_per_chunk = max(1, num_circles // 4)  # Split into up to 4 chunks
+            
+            for chunk_start in range(0, num_circles, circles_per_chunk):
+                chunk_end = min(chunk_start + circles_per_chunk, num_circles)
+                
+                for i in range(chunk_start + 1, chunk_end + 1):
+                    radius = i * circle_interval
+                    circle = plt.Circle((0, 0), radius, fill=False, color='gray', linestyle='--', alpha=0.5)
+                    ax.add_patch(circle)
+                    
+                    # Add range labels
+                    ax.text(0, radius, f"{radius}m", ha='center', va='bottom', 
+                            bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', boxstyle='round,pad=0.2'))
+                
+                # Check for cancellation between chunks
+                if cancellation_check and cancellation_check():
+                    plt.close(fig)
+                    print(f"Export cancelled during range circle drawing (chunk {chunk_start+1}/{num_circles})")
+                    return False
+        except Exception as e:
+            print(f"Error drawing range circles: {e}")
+            plt.close(fig)
+            raise
+        
+        # Report progress (60%)
+        if progress_callback:
+            progress_callback(0.6)
+        
+        try:
+            # Add directional angle markers - split into chunks
+            angles = [0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330]
+            angles_per_chunk = 4  # Process 4 angles at a time
+            
+            for chunk_start in range(0, len(angles), angles_per_chunk):
+                chunk_end = min(chunk_start + angles_per_chunk, len(angles))
+                
+                for angle in angles[chunk_start:chunk_end]:
+                    rad = np.radians(angle)
+                    x = 0.95 * max_range * np.cos(rad)
+                    y = 0.95 * max_range * np.sin(rad)
+                    ax.text(x, y, f"{angle}°", ha='center', va='center', 
+                            bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', boxstyle='round,pad=0.2'))
+                
+                # Check for cancellation between chunks
+                if cancellation_check and cancellation_check():
+                    plt.close(fig)
+                    print(f"Export cancelled during angle marker drawing")
+                    return False
+        except Exception as e:
+            print(f"Error drawing angle markers: {e}")
+            plt.close(fig)
+            raise
+        
+        # Report progress (70%)
+        if progress_callback:
+            progress_callback(0.7)
+        
+        try:
+            # Draw target distance circle
+            target_circle = plt.Circle((0, 0), target_distance, fill=False, color='orange', linestyle='--', linewidth=1.5)
+            ax.add_patch(target_circle)
+            ax.text(0, target_distance, f"Target: {target_distance}m", ha='center', va='bottom', color='orange',
+                    bbox=dict(facecolor='white', alpha=0.8, edgecolor='orange', boxstyle='round,pad=0.2'))
+            
+            # Draw ROI circles
+            roi_circle = plt.Circle((0, circle_distance), circle_radius, fill=False, color='red', linewidth=2)
+            ax.add_patch(roi_circle)
+        except Exception as e:
+            print(f"Error drawing target and ROI circles: {e}")
+            plt.close(fig)
+            raise
+        
+        # Check for cancellation
+        if cancellation_check and cancellation_check():
+            plt.close(fig)
+            print("Export cancelled after drawing circles")
+            return False
+        
+        # Report progress (80%)
+        if progress_callback:
+            progress_callback(0.8)
+        
+        try:
+            # Create custom legend elements
+            from matplotlib.lines import Line2D
+            legend_elements = [
+                Line2D([0], [0], color='gray', linestyle='--', label='Range Circles'),
+                Line2D([0], [0], color='orange', linestyle='--', label=f'Target: {target_distance}m'),
+                Line2D([0], [0], color='red', label=f'ROI: {circle_distance}m @ {circle_radius}m')
+            ]
+            ax.legend(handles=legend_elements, loc='upper right', framealpha=0.9)
+            
+            # Set axis limits and labels
+            ax.set_xlim(-max_range, max_range)
+            ax.set_ylim(-max_range, max_range)
+            ax.set_xlabel('Distance (m)')
+            ax.set_ylabel('Distance (m)')
+            
+            # Add title and metadata
+            title = f"Radar Point Cloud Analysis: {config_name}\n"
+            subtitle = f"Target: {target_distance}m, ROI: {circle_distance}m @ {circle_radius}m radius"
+            ax.set_title(title + subtitle)
+            
+            # Add timestamp and settings
+            import datetime
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            settings_text = (
+                f"Settings: noise_floor={noise_floor:.2f}, smoothing={smoothing_sigma:.2f}, "
+                f"colormap={colormap}, mode={visualization_mode}"
+            )
+            fig.text(0.5, 0.01, f"{timestamp}\n{settings_text}", ha='center', fontsize=8, color='gray')
+        except Exception as e:
+            print(f"Error setting up chart decorations: {e}")
+            plt.close(fig)
+            raise
+        
+        # Check for cancellation
+        if cancellation_check and cancellation_check():
+            plt.close(fig)
+            print("Export cancelled before saving")
+            return False
+        
+        # Report progress (90%)
+        if progress_callback:
+            progress_callback(0.9)
+        
+        try:
+            # Save the plot to file path with tight layout
+            fig.tight_layout(rect=[0, 0.03, 1, 0.97])  # Adjust layout to make room for timestamp text
+            plt.savefig(file_path, dpi=150, bbox_inches='tight')
+        except Exception as e:
+            print(f"Error saving figure to {file_path}: {e}")
+            plt.close(fig)
+            raise
+        finally:
+            # Always close the figure
+            plt.close(fig)
+            # Force garbage collection to free memory
+            gc.collect()
+        
+        # Report completion
+        if progress_callback:
+            progress_callback(1.0)
+        
+        return True
     
-    # Add directional angle markers
-    for angle in [0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330]:
-        rad = np.radians(angle)
-        x = 0.95 * max_range * np.cos(rad)
-        y = 0.95 * max_range * np.sin(rad)
-        ax.text(x, y, f"{angle}°", ha='center', va='center', 
-                bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', boxstyle='round,pad=0.2'))
-    
-    # Report progress (70%)
-    if progress_callback:
-        progress_callback(0.7)
-    
-    # Draw target distance circle
-    target_circle = plt.Circle((0, 0), target_distance, fill=False, color='orange', linestyle='--', linewidth=1.5)
-    ax.add_patch(target_circle)
-    ax.text(0, target_distance, f"Target: {target_distance}m", ha='center', va='bottom', color='orange',
-            bbox=dict(facecolor='white', alpha=0.8, edgecolor='orange', boxstyle='round,pad=0.2'))
-    
-    # Draw ROI circles
-    roi_circle = plt.Circle((0, circle_distance), circle_radius, fill=False, color='red', linewidth=2)
-    ax.add_patch(roi_circle)
-    
-    # Create custom legend elements
-    from matplotlib.lines import Line2D
-    legend_elements = [
-        Line2D([0], [0], color='gray', linestyle='--', label='Range Circles'),
-        Line2D([0], [0], color='orange', linestyle='--', label=f'Target: {target_distance}m'),
-        Line2D([0], [0], color='red', label=f'ROI: {circle_distance}m @ {circle_radius}m')
-    ]
-    ax.legend(handles=legend_elements, loc='upper right', framealpha=0.9)
-    
-    # Report progress (80%)
-    if progress_callback:
-        progress_callback(0.8)
-    
-    # Set axis limits and labels
-    ax.set_xlim(-max_range, max_range)
-    ax.set_ylim(-max_range, max_range)
-    ax.set_xlabel('Distance (m)')
-    ax.set_ylabel('Distance (m)')
-    
-    # Add title and metadata
-    title = f"Radar Point Cloud Analysis: {config_name}\n"
-    subtitle = f"Target: {target_distance}m, ROI: {circle_distance}m @ {circle_radius}m radius"
-    ax.set_title(title + subtitle)
-    
-    # Add timestamp and settings
-    import datetime
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    settings_text = (
-        f"Settings: noise_floor={noise_floor:.2f}, smoothing={smoothing_sigma:.2f}, "
-        f"colormap={colormap}, mode={visualization_mode}"
-    )
-    fig.text(0.5, 0.01, f"{timestamp}\n{settings_text}", ha='center', fontsize=8, color='gray')
-    
-    # Report progress (90%)
-    if progress_callback:
-        progress_callback(0.9)
-    
-    # Save the plot to file path with tight layout
-    fig.tight_layout(rect=[0, 0.03, 1, 0.97])  # Adjust layout to make room for timestamp text
-    plt.savefig(file_path, dpi=150, bbox_inches='tight')
-    plt.close(fig)
-    
-    # Report completion
-    if progress_callback:
-        progress_callback(1.0)
+    except Exception as e:
+        import traceback
+        print(f"Error in save_scientific_visualization: {e}")
+        traceback.print_exc()
+        # Make sure to clean up any matplotlib resources
+        plt.close('all')
+        gc.collect()
+        raise
 
 
 def update_statistics_text(

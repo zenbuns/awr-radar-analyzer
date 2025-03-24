@@ -722,9 +722,69 @@ class RadarPointCloudAnalyzer(Node):
             x_array = np.array(self.experiment_data.x_points, dtype=np.float32)
             y_array = np.array(self.experiment_data.y_points, dtype=np.float32)
             intensities_array = np.array(self.experiment_data.intensities, dtype=np.float32)
-
-            # Calculate distances from origin
-            distances = np.sqrt(x_array ** 2 + y_array ** 2)
+            timestamps_array = np.array(self.experiment_data.timestamps, dtype=np.float32)
+            
+            # Get the frame count for analysis - use all frames by default for more accurate total counts
+            frames_to_analyze = getattr(self.params, 'analysis_frame_count', None)  # Use configured value if available
+            
+            # If no specific configuration, use all available frames
+            if frames_to_analyze is None:
+                if len(timestamps_array) > 0:
+                    unique_timestamps = np.unique(timestamps_array)
+                    frames_to_analyze = len(unique_timestamps)
+                    self.get_logger().info(f"Using all {frames_to_analyze} frames for distance band analysis")
+                else:
+                    frames_to_analyze = 10  # Default fallback if no timestamp data
+            
+            # Optional: Allow limiting to recent frames via configuration
+            use_recent_frames_only = getattr(self.params, 'use_recent_frames_only', False)
+            
+            # Limit analysis to specific frames if requested
+            if use_recent_frames_only and len(timestamps_array) > 0:
+                # Get unique timestamps
+                unique_timestamps = np.unique(timestamps_array)
+                
+                # Define recent frames to use (all or limited)
+                max_frames_to_use = min(frames_to_analyze, 10)  # Don't use more than 10 for "recent" frames
+                
+                # If we have more frames than max_frames_to_use, use only the most recent ones
+                if len(unique_timestamps) > max_frames_to_use:
+                    # Sort and get the most recent timestamps
+                    recent_timestamps = np.sort(unique_timestamps)[-max_frames_to_use:]
+                    
+                    # Create a mask for the most recent frames
+                    recent_mask = np.isin(timestamps_array, recent_timestamps)
+                    
+                    # Apply the mask to all arrays
+                    x_array = x_array[recent_mask]
+                    y_array = y_array[recent_mask]
+                    intensities_array = intensities_array[recent_mask]
+                    
+                    self.get_logger().info(f"Limited analysis to {max_frames_to_use} most recent frames ({len(x_array)} points)")
+            else:
+                self.get_logger().info(f"Analyzing all available data: {len(x_array)} points from {frames_to_analyze} frames")
+            
+            # Calculate distances from origin using all data
+            # For radar, forward might be y-axis positive; we may need to consider direction
+            
+            # Standard Euclidean distance (radial from origin)
+            distances_euclidean = np.sqrt(x_array ** 2 + y_array ** 2)
+            
+            # Alternative: distance along primary axis (Y-axis for radar typically points forward)
+            # Use absolute values to ensure we're measuring distance regardless of direction
+            distances_forward = np.abs(y_array)
+            
+            # Determine which distance calculation to use based on parameters
+            use_directional = getattr(self.params, 'use_directional_distance', False)
+            
+            if use_directional:
+                # Use directional distance (along forward axis)
+                distances = distances_forward
+                self.get_logger().info("Using directional (Y-axis) distance calculation")
+            else:
+                # Use standard Euclidean distance from origin
+                distances = distances_euclidean
+                self.get_logger().info("Using radial/Euclidean distance calculation")
             
             # Create distance bins
             bins = np.arange(0, self.params.max_range + self.params.circle_interval, self.params.circle_interval)
@@ -735,21 +795,61 @@ class RadarPointCloudAnalyzer(Node):
                 band_key = f"{bins[i]}-{bins[i+1]}m"
                 band_mask = (distances >= bins[i]) & (distances < bins[i+1])
                 band_intensities = intensities_array[band_mask]
+                band_count = float(np.sum(band_mask))  # More reliable count calculation
                 avg_intensity = float(np.mean(band_intensities)) if band_intensities.size > 0 else 0.0
-                distance_bands[band_key] = {'count': float(counts[i]), 'avg_intensity': avg_intensity}
+                distance_bands[band_key] = {'count': band_count, 'avg_intensity': avg_intensity}
 
             if self.params.current_config not in self.config_results:
                 self.config_results[self.params.current_config] = {}
 
             # Find the band containing the target distance
-            target_band_key = next(
-                (band for band in distance_bands
-                 if float(band.split('-')[0]) <= self.params.target_distance
-                 < float(band.split('-')[1].replace('m', ''))),
-                list(distance_bands.keys())[0] if distance_bands else "0-0m"
-            )
+            target_band_key = None
+            target_distance = self.params.target_distance
+            
+            # First try exact matching using the target distance
+            for band_key in distance_bands.keys():
+                band_start, band_end = band_key.split('-')
+                band_start = float(band_start)
+                band_end = float(band_end.replace('m', ''))
+                
+                if band_start <= target_distance < band_end:
+                    target_band_key = band_key
+                    self.get_logger().info(f"Target band for {target_distance}m identified as {target_band_key}")
+                    break
+            
+            # Fallback to the first band if target band not found
+            if target_band_key is None:
+                target_band_key = list(distance_bands.keys())[0] if distance_bands else "0-0m"
+                self.get_logger().warn(f"Could not find exact band for {target_distance}m, using {target_band_key}")
 
-            circle_counts = len(self.experiment_data.x_points)
+            # Double-check the target band points with direct calculation
+            target_band_start, target_band_end = target_band_key.split('-')
+            target_band_start = float(target_band_start)
+            target_band_end = float(target_band_end.replace('m', ''))
+            
+            # Create mask for target band points and count them directly
+            target_band_mask = (distances >= target_band_start) & (distances < target_band_end)
+            target_band_points = float(np.sum(target_band_mask))
+            
+            # Log detailed diagnostic information
+            self.get_logger().info(f"Points in distance range {target_band_start}-{target_band_end}m: {target_band_points}")
+            self.get_logger().info(f"Total points analyzed: {len(distances)}")
+            
+            # Special handling for specific bands for easier diagnostics
+            for band_key, band_data in distance_bands.items():
+                band_start, band_end = band_key.split('-')
+                band_start = float(band_start)
+                band_end = float(band_end.replace('m', ''))
+                band_mask = (distances >= band_start) & (distances < band_end)
+                actual_count = float(np.sum(band_mask))
+                
+                if abs(actual_count - band_data['count']) > 0.01:
+                    self.get_logger().warn(f"Count mismatch in band {band_key}: stored={band_data['count']}, actual={actual_count}")
+                    # Update to the correct count
+                    distance_bands[band_key]['count'] = actual_count
+
+            # Use all points for calculations
+            circle_counts = len(x_array)
             circle_avg_intensity = float(np.mean(intensities_array)) if intensities_array.size > 0 else 0.0
 
             # Store results in config_results
@@ -757,10 +857,11 @@ class RadarPointCloudAnalyzer(Node):
                 'total_points': circle_counts,
                 'distance_bands': distance_bands,
                 'target_band': target_band_key,
-                'target_band_points': distance_bands[target_band_key]['count'] if target_band_key in distance_bands else 0,
+                'target_band_points': target_band_points,  # Use directly calculated value
                 'avg_intensity': circle_avg_intensity,
                 'circle_points': circle_counts,
-                'circle_avg_intensity': circle_avg_intensity
+                'circle_avg_intensity': circle_avg_intensity,
+                'frames_analyzed': frames_to_analyze  # Store how many frames were used in the analysis
             }
             
             # Add multi-frame metrics if available

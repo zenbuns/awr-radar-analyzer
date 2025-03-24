@@ -118,6 +118,7 @@ class ControlPanel(QWidget):
         # Point counter tracking for throttling
         self.last_point_count = 0
         self.point_update_counter = 0
+        self.point_history = []  # Store last 10 frame point counts
         
         # Create UI components
         self.setup_ui()
@@ -131,7 +132,7 @@ class ControlPanel(QWidget):
         self.progress_timer.timeout.connect(self.update_progress)
         self.collection_start_time = None
         self.collection_duration = 60  # seconds
-        
+    
     def setup_ui(self):
         """Set up the widget UI components."""
         # Main layout
@@ -588,12 +589,12 @@ class ControlPanel(QWidget):
         """)
         status_layout.addWidget(self.progress_bar)
         
-        # Add some additional stats placeholders for future use
+        # Collection Stats
         stats_label = QLabel("Collection Stats:")
         stats_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
         status_layout.addWidget(stats_label)
         
-        self.points_collected_label = QLabel("Points: 0")
+        self.points_collected_label = QLabel("Density: 0 pts/frame")
         self.points_collected_label.setStyleSheet("font-family: monospace;")
         status_layout.addWidget(self.points_collected_label)
         
@@ -1686,7 +1687,7 @@ class ControlPanel(QWidget):
     def reset_point_counter(self):
         """Reset the point counter display and state tracking."""
         # Reset displayed values and counters
-        self.points_collected_label.setText("Points: 0")
+        self.points_collected_label.setText("Density: 0 pts/frame")
         self.progress_bar.setValue(0)
         self.collection_time_label.setText("Time: 00:00")
         
@@ -1695,6 +1696,7 @@ class ControlPanel(QWidget):
         self.last_point_count = 0
         self.collection_frames = 0
         self.point_update_counter = 0
+        self.point_history = []  # Clear point history
         
         # Reset experiment data in analyzer if available
         analyzer = getattr(self, 'main_window', None)
@@ -2096,6 +2098,17 @@ class ControlPanel(QWidget):
                         
                         # Only access current_data inside the lock
                         if hasattr(analyzer, 'current_data'):
+                            # Get points in the current frame
+                            current_frame_points = len(analyzer.current_data.get('x', []))
+                            
+                            # Add to point history (keep last 10 frames)
+                            self.point_history.append(current_frame_points)
+                            if len(self.point_history) > 10:
+                                self.point_history.pop(0)
+                            
+                            # Calculate average points per frame
+                            avg_points_per_frame = sum(self.point_history) / len(self.point_history)
+                            
                             circle_points = len(analyzer.current_data.get('circle_x', []))
                             current_bands = analyzer.current_data.get('circle_distance_bands', {})
                             
@@ -2131,7 +2144,18 @@ class ControlPanel(QWidget):
         if points != -1:
             # Every 10th update or when count changes
             if points != self.last_point_count or self.point_update_counter >= 10:
-                # Show total point count and target band points if available
+                # Calculate average points per frame if history is available
+                avg_text = ""
+                if self.point_history:
+                    avg_points = sum(self.point_history) / len(self.point_history)
+                    avg_text = f"Density: {avg_points:.1f} pts/frame"
+                else:
+                    avg_text = "Density: 0 pts/frame"
+                
+                # Update UI text with the average density
+                self.points_collected_label.setText(avg_text)
+                
+                # Show total point count and target band points if available in debug output
                 if target_band_points > 0 and analyzer:
                     try:
                         with analyzer.data_lock:
@@ -2141,18 +2165,15 @@ class ControlPanel(QWidget):
                     target_band_width = 1.0
                     target_band = f"{int(target_dist)}m-{int(target_dist)+target_band_width}m"
                     
-                    # Include ROI breakdown in the display text when applicable
-                    if roi_points > 0 or outside_roi_points > 0:
-                        display_text = f"Points: {points} (ROI: {roi_points}, Outside: {outside_roi_points})"
-                        display_text += f" (Target {target_band}: {target_band_points})"
-                    else:
-                        display_text = f"Points: {points} (Target {target_band}: {target_band_points})"
+                    # Log detailed point information for debugging
+                    debug_text = f"Total pts: {points} (ROI: {roi_points}, Outside: {outside_roi_points})"
+                    debug_text += f" (Target {target_band}: {target_band_points})"
+                    print(debug_text)
                 else:
-                    # Include ROI breakdown in the display text when applicable
+                    # Log detailed point information for debugging
                     if roi_points > 0 or outside_roi_points > 0:
-                        display_text = f"Points: {points} (ROI: {roi_points}, Outside: {outside_roi_points})"
-                    else:
-                        display_text = f"Points: {points}"
+                        debug_text = f"Total pts: {points} (ROI: {roi_points}, Outside: {outside_roi_points})"
+                        print(debug_text)
                 
                 # Add distance band breakdown if we have it
                 if distance_bands and self.point_update_counter >= 20:
@@ -2165,18 +2186,12 @@ class ControlPanel(QWidget):
                 
                 self.last_point_count = points
                 self.point_update_counter = 0
-                
-                # Only update the UI when needed
-                if display_text:
-                    self.points_collected_label.setText(display_text)
-                    if points > 0 and points % 100 == 0:  # Log periodically for debugging
-                        print(f"Point count update: {points}")
         else:
             # Error case - only update occasionally
             if self.point_update_counter >= 20:
-                self.points_collected_label.setText("Points: --")
+                self.points_collected_label.setText("Density: -- pts/frame")
                 self.point_update_counter = 0
-        
+    
         # Handle completion
         if progress >= 100:
             self.progress_bar.setValue(100)

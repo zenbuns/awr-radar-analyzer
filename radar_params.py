@@ -48,6 +48,8 @@ class RadarExperimentParams:
         circle_radius: Radius of the primary sampling circle in meters.
         circles: List of sampling circles for data collection.
         num_trials: Number of repeated trials for this experiment configuration.
+        use_directional_distance: If True, use directional (forward-axis) distance 
+                                calculation for distance bands instead of Euclidean distance.
     """
 
     max_range: float = 35.0
@@ -72,6 +74,8 @@ class RadarExperimentParams:
         SamplingCircle(enabled=False, distance=15.0, radius=0.5, angle=-60.0, color="cyan", label="Left"),
         SamplingCircle(enabled=False, distance=25.0, radius=0.5, angle=60.0, color="yellow", label="Right"),
     ])
+
+    use_directional_distance: bool = False  # Added parameter
 
     def __post_init__(self):
         """

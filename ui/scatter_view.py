@@ -145,7 +145,8 @@ class ScatterView(QWidget):
             if 0 < r <= self.max_range:
                 self.ax.text(
                     r * 0.05, r, f"{int(r)}m", ha='left', va='bottom', 
-                    color='#99CCFF', fontsize=7, weight='normal',
+                    color='#99CCFF', fontsize=10,  # Increased from 7
+                    weight='normal',
                     bbox=dict(facecolor='#020924', edgecolor='none', 
                              alpha=0.7, pad=1, boxstyle='round,pad=0.1')
                 )
@@ -226,7 +227,7 @@ class ScatterView(QWidget):
             self.ax.text(
                 x_label, y_label, f"{angle}°", 
                 color='#99BBDD',
-                fontsize=7,
+                fontsize=10,  # Increased from 7
                 ha='center', 
                 va='center',
                 bbox=dict(facecolor='#050510', edgecolor='none', alpha=0.7, boxstyle='round,pad=0.1')
@@ -293,20 +294,6 @@ class ScatterView(QWidget):
             )
             self.ax.add_patch(sampling_circle)
             
-            # Add small targeting crosshairs at center of sampling circle
-            if config['enabled']:
-                crosshair_size = 0.3
-                self.ax.plot(
-                    [x_pos-crosshair_size, x_pos+crosshair_size], 
-                    [y_pos, y_pos], 
-                    color=config['color'], linewidth=0.4, alpha=0.6
-                )
-                self.ax.plot(
-                    [x_pos, x_pos], 
-                    [y_pos-crosshair_size, y_pos+crosshair_size], 
-                    color=config['color'], linewidth=0.4, alpha=0.6
-                )
-            
             self.components[f'sampling_circle_{i}'] = sampling_circle
             self.components['sampling_circles'].append({
                 'circle': sampling_circle,
@@ -316,13 +303,13 @@ class ScatterView(QWidget):
             })
         
         # Set labels and title with scientific radar terminology
-        self.ax.set_xlabel('Azimuth (m)', fontsize=9, labelpad=10, color='#99CCFF')
-        self.ax.set_ylabel('Range (m)', fontsize=9, labelpad=10, color='#99CCFF')
-        self.ax.set_title('Radar Point Cloud', fontsize=11, color='#DDEEFF', weight='normal')
+        self.ax.set_xlabel('Azimuth (m)', fontsize=12, labelpad=10, color='#99CCFF')  # Increased from 9
+        self.ax.set_ylabel('Range (m)', fontsize=12, labelpad=10, color='#99CCFF')    # Increased from 9
+        self.ax.set_title('Radar Point Cloud', fontsize=14, color='#DDEEFF', weight='normal')  # Increased from 11
         
         # Configure ticks with scientific precision
-        self.ax.tick_params(axis='x', colors='#99CCFF', labelsize=8, width=1.0, length=4)
-        self.ax.tick_params(axis='y', colors='#99CCFF', labelsize=8, width=1.0, length=4)
+        self.ax.tick_params(axis='x', colors='#99CCFF', labelsize=10, width=1.0, length=4)  # Increased from 8
+        self.ax.tick_params(axis='y', colors='#99CCFF', labelsize=10, width=1.0, length=4)  # Increased from 8
         
         # Set spine colors for scientific border
         for spine in self.ax.spines.values():
@@ -353,7 +340,7 @@ class ScatterView(QWidget):
             0.98, 0.98, res_text,
             transform=self.ax.transAxes,
             color='#99CCFF',
-            fontsize=7,
+            fontsize=10,  # Increased from 7
             ha='right',
             va='top',
             bbox=dict(
@@ -369,7 +356,7 @@ class ScatterView(QWidget):
             0.02, 0.98, '',
             transform=self.ax.transAxes,
             verticalalignment='top',
-            fontsize=8,
+            fontsize=11,  # Increased from 8
             color='#99CCFF',
             bbox=dict(
                 boxstyle='round,pad=0.3',
@@ -383,7 +370,7 @@ class ScatterView(QWidget):
             0.02, 0.8, '',
             transform=self.ax.transAxes,
             verticalalignment='top',
-            fontsize=8,
+            fontsize=11,  # Increased from 8
             color='#99CCFF',
             bbox=dict(
                 boxstyle='round,pad=0.3',

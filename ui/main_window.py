@@ -14,9 +14,10 @@ from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QAction, QMenu, QToolBar, QStatusBar, QFileDialog, QMessageBox,
     QLabel, QFrame, QPushButton, QSizePolicy, QApplication, QProgressDialog,
-    QProgressBar, QTabWidget, QMenuBar
+    QProgressBar, QTabWidget, QMenuBar, QGroupBox, QRadioButton, QButtonGroup,
+    QInputDialog, QCheckBox
 )
-from PyQt5.QtCore import Qt, QTimer, pyqtSlot, QSize, QUrl, QThread, pyqtSignal
+from PyQt5.QtCore import Qt, QTimer, pyqtSlot, QSize, QUrl, QThread, pyqtSignal, QObject
 from PyQt5.QtGui import QIcon, QPixmap, QFont, QDesktopServices
 import time
 
@@ -26,6 +27,104 @@ from ui.control_panel import ControlPanel
 from utils.visualization import save_scientific_visualization
 from .styles import DARK_STYLESHEET, Colors, apply_mpl_style
 from ui.point_cloud_view import PointCloudView
+
+
+class CombinedView(QWidget):
+    """
+    A combined view that shows both scatter plot and heatmap side by side.
+    
+    This class provides a widget that contains both visualization types
+    with toggle options to show/hide each view independently.
+    """
+    
+    def __init__(self, parent=None):
+        """
+        Initialize the combined view widget.
+        
+        Args:
+            parent: Parent widget (optional).
+        """
+        super().__init__(parent)
+        
+        # Store reference to parent window
+        self.main_window = parent
+        self.scatter_view = None
+        self.heatmap_view = None
+        
+        # Set up the UI
+        self.setup_ui()
+        
+    def setup_ui(self):
+        """Set up the widget UI components."""
+        # Create main layout
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 5, 0, 0)
+        
+        # Create controls
+        controls_layout = QHBoxLayout()
+        controls_layout.setContentsMargins(10, 0, 10, 5)
+        
+        # Create scatter view toggle
+        self.scatter_toggle = QCheckBox("Show Scatter Plot")
+        self.scatter_toggle.setChecked(True)
+        self.scatter_toggle.toggled.connect(self.toggle_scatter_view)
+        controls_layout.addWidget(self.scatter_toggle)
+        
+        # Create heatmap toggle
+        self.heatmap_toggle = QCheckBox("Show Heatmap")
+        self.heatmap_toggle.setChecked(True)
+        self.heatmap_toggle.toggled.connect(self.toggle_heatmap_view)
+        controls_layout.addWidget(self.heatmap_toggle)
+        
+        # Add controls to main layout
+        main_layout.addLayout(controls_layout)
+        
+        # Create splitter for the views
+        self.splitter = QSplitter(Qt.Horizontal)
+        main_layout.addWidget(self.splitter, 1)  # Give splitter all available space
+    
+    def set_views(self, scatter_view, heatmap_view):
+        """
+        Set the scatter and heatmap views.
+        
+        Args:
+            scatter_view: ScatterView instance.
+            heatmap_view: HeatmapView instance.
+        """
+        self.scatter_view = scatter_view
+        self.heatmap_view = heatmap_view
+        
+        # Add views to splitter
+        if self.scatter_view and self.scatter_view.parent() != self.splitter:
+            self.splitter.addWidget(self.scatter_view)
+        
+        if self.heatmap_view and self.heatmap_view.parent() != self.splitter:
+            self.splitter.addWidget(self.heatmap_view)
+        
+        # Set equal sizes
+        if self.splitter.count() == 2:
+            width = self.splitter.width()
+            self.splitter.setSizes([width // 2, width // 2])
+    
+    def toggle_scatter_view(self, checked):
+        """
+        Toggle scatter view visibility.
+        
+        Args:
+            checked: Whether the scatter view should be visible.
+        """
+        if self.scatter_view:
+            self.scatter_view.setVisible(checked)
+    
+    def toggle_heatmap_view(self, checked):
+        """
+        Toggle heatmap view visibility.
+        
+        Args:
+            checked: Whether the heatmap view should be visible.
+        """
+        if self.heatmap_view:
+            self.heatmap_view.setVisible(checked)
 
 
 class MainWindow(QMainWindow):
@@ -58,6 +157,7 @@ class MainWindow(QMainWindow):
         # UI components
         self.scatter_view = None
         self.heatmap_view = None
+        self.combined_view = None
         self.control_panel = None
         
         # Apply dark style to matplotlib
@@ -65,6 +165,9 @@ class MainWindow(QMainWindow):
         
         # Set up the UI
         self.init_ui()
+        
+        # Initialize the combined view with the scatter and heatmap views
+        self.combined_view.set_views(self.scatter_view, self.heatmap_view)
         
         # Connect signals and slots
         self.connect_signals()
@@ -112,16 +215,19 @@ class MainWindow(QMainWindow):
         self.point_cloud_view = PointCloudView(self)
         tabs.addTab(self.point_cloud_view, "3D View")
         
-        # Create and add scatter view tab
+        # Create scatter view and heatmap view instances without adding them to tabs
         self.scatter_view = ScatterView(self)
-        tabs.addTab(self.scatter_view, "Scatter Plot")
-        
-        # Create and add heatmap view tab
         self.heatmap_view = HeatmapView(self)
-        tabs.addTab(self.heatmap_view, "Heatmap")
         
-        # Set current tab to heatmap
-        tabs.setCurrentIndex(2)
+        # Create and add combined view tab
+        self.combined_view = CombinedView(self)
+        tabs.addTab(self.combined_view, "Combined View")
+        
+        # Connect tab change signal to handle view reparenting
+        tabs.currentChanged.connect(self.handle_tab_change)
+        
+        # Set current tab to combined view
+        tabs.setCurrentIndex(1)
         
         # Add tabs to visualization layout
         viz_layout.addWidget(tabs)
@@ -210,7 +316,8 @@ class MainWindow(QMainWindow):
         
         gen_report_action = QAction("&Generate Report", self)
         gen_report_action.setShortcut("Ctrl+G")
-        gen_report_action.triggered.connect(self.generate_report)
+        # Temporarily disable the connection to fix the AttributeError
+        # gen_report_action.triggered.connect(self.generate_report)
         data_menu.addAction(gen_report_action)
         
         # View menu
@@ -538,32 +645,75 @@ class MainWindow(QMainWindow):
         if self.analyzer is not None and hasattr(self.analyzer, 'params'):
             self.analyzer.params.toggle_circle(index, enabled)
     
-    @pyqtSlot(str, str, int)
     def start_data_collection_with_params(self, config_name, target_distance, duration):
-        """
-        Start data collection with specified parameters.
-        
-        Args:
-            config_name: Configuration name.
-            target_distance: Target distance as string.
-            duration: Collection duration in seconds.
-        """
-        if self.analyzer is not None:
-            success = self.analyzer.start_data_collection(config_name, target_distance, duration)
-            if success:
-                self.status_bar.showMessage(f"Collecting data for configuration: {config_name}")
-                self.heatmap_view.update_target_distance(float(target_distance))
-            else:
-                self.status_bar.showMessage("Failed to start data collection")
-                self.control_panel.on_stop_collection()  # Reset UI state
+        """Start data collection with provided parameters."""
+        if not hasattr(self, 'analyzer') or self.analyzer is None:
+            QMessageBox.warning(self, "Error", "Analyzer not initialized")
+            return
+
+        # Convert target distance to float
+        try:
+            target_dist = float(target_distance)
+        except ValueError:
+            QMessageBox.warning(self, "Error", "Invalid target distance")
+            return
+
+        # Start data collection
+        success = self.analyzer.start_data_collection(
+            config_name, target_dist, duration
+        )
+
+        if success:
+            self.status_bar.showMessage(
+                f"Started data collection for {config_name} at {target_dist}m for {duration}s"
+            )
+            # Update UI to reflect collection state
+            self.collection_active = True
+            # Additional UI updates can be added here
+        else:
+            QMessageBox.warning(
+                self, "Error", "Failed to start data collection"
+            )
     
     @pyqtSlot()
     def start_data_collection(self):
-        """Start data collection using current UI parameters."""
-        config_name = self.control_panel.config_entry.text().strip()
-        target_distance = self.control_panel.target_combo.currentText()
-        duration = self.control_panel.duration_spin.value()
+        """Open dialog to configure and start data collection."""
+        if not hasattr(self, 'analyzer') or self.analyzer is None:
+            QMessageBox.warning(self, "Error", "Analyzer not initialized")
+            return
+            
+        # Ensure the distance calculation mode is set correctly before starting collection
+        if hasattr(self, 'directional_radio') and hasattr(self, 'euclidean_radio'):
+            use_directional = self.directional_radio.isChecked()
+            self.analyzer.params.use_directional_distance = use_directional
+            self.analyzer.get_logger().info(
+                f"Distance calculation set to: {'directional' if use_directional else 'Euclidean'}"
+            )
         
+        # Get collection parameters from UI
+        config_name, ok = QInputDialog.getText(
+            self, "Start Collection", "Configuration Name:"
+        )
+        if not ok or not config_name:
+            return
+            
+        target_distance, ok = QInputDialog.getText(
+            self, "Start Collection", "Target Distance (m):"
+        )
+        if not ok or not target_distance:
+            return
+            
+        try:
+            # Convert target distance to float
+            target_dist = float(target_distance)
+        except ValueError:
+            QMessageBox.warning(self, "Error", "Invalid target distance")
+            return
+            
+        # Set duration (default to 60 seconds)
+        duration = 60
+            
+        # Call the actual collection method with parameters
         self.start_data_collection_with_params(config_name, target_distance, duration)
     
     @pyqtSlot()
@@ -710,8 +860,10 @@ class MainWindow(QMainWindow):
     @pyqtSlot()
     def export_scientific_plot(self):
         """Export a high-quality scientific visualization of the radar data."""
+        # Check if we have data to export
         if self.analyzer is None or self.analyzer.live_heatmap_data is None:
             self.status_bar.showMessage("No data to export")
+            QMessageBox.warning(self, "No Data", "No radar data available to export.")
             return
         
         try:
@@ -721,168 +873,385 @@ class MainWindow(QMainWindow):
             
             # Ensure the export directory exists
             export_dir = os.path.join(os.path.expanduser("~"), "radar_experiment_data", "exports")
-            os.makedirs(export_dir, exist_ok=True)
-            
-            # Get last used directory or default to exports directory
-            default_dir = export_dir
-            if hasattr(self.control_panel, 'last_used_directory'):
-                last_dir = self.control_panel.last_used_directory()
-                if last_dir and os.path.exists(last_dir):
-                    default_dir = last_dir
+            try:
+                os.makedirs(export_dir, exist_ok=True)
+            except Exception as e:
+                print(f"Error creating export directory: {e}")
+                # If default export directory creation fails, try using the home directory
+                export_dir = os.path.expanduser("~")
             
             # Generate default filename with timestamp
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            config_name = self.control_panel.config_entry.text().strip() or "default_config"
+            config_name = "default_config"
+            if hasattr(self.control_panel, 'config_entry') and self.control_panel.config_entry.text().strip():
+                config_name = self.control_panel.config_entry.text().strip()
+                
             default_filename = f"radar_plot_{config_name}_{timestamp}.png"
+            default_path = os.path.join(export_dir, default_filename)
             
-            # Show directory selection dialog first
-            export_dir = QFileDialog.getExistingDirectory(
-                self,
-                "Select Export Directory",
-                default_dir,
-                QFileDialog.ShowDirsOnly
-            )
+            # Use a single file dialog with a simpler approach
+            try:
+                # Disable complex dialog options to prevent hangs
+                options = QFileDialog.Options()
+                options |= QFileDialog.DontUseNativeDialog  # Use Qt's dialog, not the OS native one
+                
+                file_path, _ = QFileDialog.getSaveFileName(
+                    self,
+                    "Save Scientific Plot",
+                    default_path,
+                    "PNG Image (*.png);;PDF Document (*.pdf);;SVG Image (*.svg)",
+                    options=options
+                )
+            except Exception as dialog_error:
+                print(f"Error with file dialog: {dialog_error}")
+                # Fallback to a default path if the dialog fails
+                file_path = default_path
+                QMessageBox.warning(
+                    self,
+                    "Dialog Error",
+                    f"File dialog failed. Will save to:\n{file_path}"
+                )
             
-            if not export_dir:
-                # User canceled, unlock UI and return
-                if hasattr(self.control_panel, 'state_manager'):
-                    self.control_panel.state_manager.transition('unlock_ui')
-                return
-            
-            # Now show file name dialog
-            file_path, _ = QFileDialog.getSaveFileName(
-                self,
-                "Save Scientific Plot",
-                os.path.join(export_dir, default_filename),
-                "PNG Image (*.png);;PDF Document (*.pdf);;SVG Image (*.svg)"
-            )
-            
+            # User canceled the dialog or path is invalid
             if not file_path:
-                # User canceled, unlock UI and return
+                # Unlock the UI and return
                 if hasattr(self.control_panel, 'state_manager'):
                     self.control_panel.state_manager.transition('unlock_ui')
                 return
             
-            # Save the directory for next time
+            # Ensure the directory exists for the selected file
+            try:
+                os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            except Exception as dir_error:
+                print(f"Error creating directory for file: {dir_error}")
+                # Try to use the default path instead
+                file_path = default_path
+                QMessageBox.warning(
+                    self,
+                    "Directory Error",
+                    f"Could not create directory. Will save to:\n{file_path}"
+                )
+            
+            # Save the directory for next time if needed
             if hasattr(self.control_panel, 'save_last_used_directory'):
-                self.control_panel.save_last_used_directory(os.path.dirname(file_path))
+                try:
+                    self.control_panel.save_last_used_directory(os.path.dirname(file_path))
+                except Exception as e:
+                    print(f"Error saving last used directory: {e}")
             
             # Update status message
-            self.status_bar.showMessage("Exporting plot, please wait...")
+            self.status_bar.showMessage("Preparing to export plot...")
             QApplication.processEvents()  # Force UI update
             
-            # Get visualization parameters
-            colormap = self.control_panel.colormap_combo.currentText()
-            
-            # Get visualization mode
-            visualization_mode = "heatmap"  # Default
-            for button in self.control_panel.vis_mode_group.buttons():
-                if button.isChecked():
-                    mode_text = button.text().lower()
-                    if mode_text == "heat":
-                        visualization_mode = "heatmap"
-                    elif mode_text == "contour":
-                        visualization_mode = "contour"
-                    elif mode_text == "combined":
-                        visualization_mode = "combined"
-                    break
-            
-            # Get noise floor and smoothing parameters
+            # Get visualization parameters with defaults and error handling
             try:
-                noise_floor = float(self.control_panel.noise_value.text())
-            except ValueError:
-                noise_floor = 0.1  # Default
+                # Get colormap
+                colormap = "viridis"  # Default
+                if hasattr(self.control_panel, 'colormap_combo'):
+                    colormap = self.control_panel.colormap_combo.currentText()
                 
-            try:
-                smoothing_sigma = float(self.control_panel.smooth_value.text())
-            except ValueError:
+                # Get visualization mode
+                visualization_mode = "heatmap"  # Default
+                if hasattr(self.control_panel, 'vis_mode_group'):
+                    for button in self.control_panel.vis_mode_group.buttons():
+                        if button.isChecked():
+                            mode_text = button.text().lower()
+                            if mode_text == "heat":
+                                visualization_mode = "heatmap"
+                            elif mode_text == "contour":
+                                visualization_mode = "contour"
+                            elif mode_text == "combined":
+                                visualization_mode = "combined"
+                            break
+                
+                # Get noise floor and smoothing parameters
+                noise_floor = 0.1  # Default
                 smoothing_sigma = 1.0  # Default
+                
+                if hasattr(self.control_panel, 'noise_value'):
+                    try:
+                        noise_floor = float(self.control_panel.noise_value.text())
+                    except (ValueError, AttributeError):
+                        print("Error parsing noise floor, using default")
+                        
+                if hasattr(self.control_panel, 'smooth_value'):
+                    try:
+                        smoothing_sigma = float(self.control_panel.smooth_value.text())
+                    except (ValueError, AttributeError):
+                        print("Error parsing smoothing value, using default")
+            except Exception as param_error:
+                print(f"Error getting parameters: {param_error}")
+                # Continue with defaults if there was an error
             
             # Create a progress dialog to show export progress
-            progress_dialog = QProgressDialog("Exporting plot...", "Cancel", 0, 100, self)
-            progress_dialog.setWindowTitle("Exporting")
-            progress_dialog.setWindowModality(Qt.WindowModal)
-            progress_dialog.setMinimumDuration(0)  # Show immediately
-            progress_dialog.setValue(0)
+            self.progress_dialog = QProgressDialog("Initializing export...", "Cancel", 0, 100, self)
+            self.progress_dialog.setWindowTitle("Exporting Plot")
+            self.progress_dialog.setWindowModality(Qt.WindowModal)
+            self.progress_dialog.setMinimumDuration(0)  # Show immediately
+            self.progress_dialog.setValue(0)
+            self.progress_dialog.setAutoClose(False)
+            self.progress_dialog.setAutoReset(False)
+            
+            # Connect cancel signal to handler
+            cancel_button = self.progress_dialog.findChild(QPushButton)
+            if cancel_button:
+                cancel_button.clicked.disconnect()  # Disconnect default behavior
+                cancel_button.clicked.connect(self.cancel_export)
+            
+            # Show the progress dialog
+            self.progress_dialog.show()
+            QApplication.processEvents()  # Force UI update
             
             # Clone the heatmap data to avoid threading issues
-            heatmap_data_copy = self.analyzer.live_heatmap_data.copy() if self.analyzer.live_heatmap_data is not None else None
-            
-            # Create a callback function for progress updates
-            def progress_callback(progress):
-                # Only update if not canceled
-                if not progress_dialog.wasCanceled():
-                    progress_dialog.setValue(int(progress * 100))
-                    QApplication.processEvents()  # Allow UI to update
-            
-            # Run the export in a separate thread to avoid freezing UI
-            class ExportThread(QThread):
-                finished = pyqtSignal(bool, str)
-                progress = pyqtSignal(float)
+            try:
+                heatmap_data_copy = None
+                if self.analyzer.live_heatmap_data is not None:
+                    # Make a copy but handle potential memory issues
+                    heatmap_data_copy = self.analyzer.live_heatmap_data.copy()
                 
-                def __init__(self, file_path, heatmap_data, params):
-                    super().__init__()
-                    self.file_path = file_path
-                    self.heatmap_data = heatmap_data
-                    self.params = params
+                if heatmap_data_copy is None or heatmap_data_copy.size == 0:
+                    QMessageBox.warning(self, "No Data", "Heatmap data is empty. Export may not succeed.")
+            except Exception as data_error:
+                print(f"Error copying heatmap data: {data_error}")
+                QMessageBox.critical(
+                    self, 
+                    "Data Error", 
+                    "Failed to copy heatmap data for export. Try reducing heatmap resolution."
+                )
                 
-                def run(self):
-                    try:
-                        from utils.visualization import save_scientific_visualization
-                        save_scientific_visualization(
-                            self.file_path,
-                            self.heatmap_data,
-                            self.params['max_range'],
-                            self.params['target_distance'],
-                            self.params['circle_distance'],
-                            self.params['circle_radius'],
-                            self.params['circle_interval'],
-                            self.params['config_name'],
-                            self.params['noise_floor'],
-                            self.params['smoothing_sigma'],
-                            self.params['colormap'],
-                            self.params['visualization_mode'],
-                            progress_callback=lambda p: self.progress.emit(p)
-                        )
-                        self.finished.emit(True, self.file_path)
-                    except Exception as e:
-                        print(f"Error in export thread: {e}")
-                        self.finished.emit(False, str(e))
+                # Cleanup and return
+                if hasattr(self, 'progress_dialog') and self.progress_dialog:
+                    self.progress_dialog.close()
+                if hasattr(self.control_panel, 'state_manager'):
+                    self.control_panel.state_manager.transition('unlock_ui')
+                return
             
             # Prepare parameters for the export thread
-            export_params = {
-                'max_range': self.analyzer.params.max_range,
-                'target_distance': self.analyzer.params.target_distance,
-                'circle_distance': self.analyzer.params.circle_distance,
-                'circle_radius': self.analyzer.params.circle_radius,
-                'circle_interval': self.analyzer.params.circle_interval,
-                'config_name': config_name,
-                'noise_floor': noise_floor,
-                'smoothing_sigma': smoothing_sigma,
-                'colormap': colormap,
-                'visualization_mode': visualization_mode
-            }
+            try:
+                export_params = {
+                    'max_range': self.analyzer.params.max_range,
+                    'target_distance': self.analyzer.params.target_distance,
+                    'circle_distance': self.analyzer.params.circle_distance,
+                    'circle_radius': self.analyzer.params.circle_radius,
+                    'circle_interval': self.analyzer.params.circle_interval,
+                    'config_name': config_name,
+                    'noise_floor': noise_floor,
+                    'smoothing_sigma': smoothing_sigma,
+                    'colormap': colormap,
+                    'visualization_mode': visualization_mode
+                }
+            except Exception as param_error:
+                print(f"Error preparing export parameters: {param_error}")
+                QMessageBox.critical(self, "Parameter Error", f"Failed to prepare export parameters: {param_error}")
+                
+                # Cleanup and return
+                if hasattr(self, 'progress_dialog') and self.progress_dialog:
+                    self.progress_dialog.close()
+                if hasattr(self.control_panel, 'state_manager'):
+                    self.control_panel.state_manager.transition('unlock_ui')
+                return
             
-            # Create and start the export thread
-            self.export_thread = ExportThread(file_path, heatmap_data_copy, export_params)
+            # Create worker object and thread
+            try:
+                self.export_thread = QThread()
+                self.export_worker = self.ExportWorker(file_path, heatmap_data_copy, export_params)
+                self.export_worker.moveToThread(self.export_thread)
+                
+                # Connect signals
+                self.export_thread.started.connect(self.export_worker.run)
+                self.export_worker.progress.connect(self.update_export_progress)
+                self.export_worker.finished.connect(self.on_export_completed)
+                self.export_worker.finished.connect(self.export_thread.quit)
+                self.export_thread.finished.connect(self.cleanup_export_thread)
+            except Exception as thread_error:
+                print(f"Error setting up export thread: {thread_error}")
+                QMessageBox.critical(self, "Thread Error", f"Failed to set up export thread: {thread_error}")
+                
+                # Cleanup and return
+                if hasattr(self, 'progress_dialog') and self.progress_dialog:
+                    self.progress_dialog.close()
+                if hasattr(self.control_panel, 'state_manager'):
+                    self.control_panel.state_manager.transition('unlock_ui')
+                return
             
-            # Connect signals
-            self.export_thread.progress.connect(progress_callback)
-            self.export_thread.finished.connect(self.on_export_completed)
-            
-            # Store file path for later use
-            self.current_export_path = file_path
+            # Set a timeout timer
+            try:
+                self.export_timeout_timer = QTimer(self)
+                self.export_timeout_timer.setSingleShot(True)
+                self.export_timeout_timer.timeout.connect(self.check_export_timeout)
+                self.export_timeout_timer.start(20000)  # 20 second timeout - reduced from 30
+            except Exception as timer_error:
+                print(f"Error setting up timeout timer: {timer_error}")
+                # Continue without the timer if it fails
             
             # Start the thread
-            self.export_thread.start()
+            try:
+                self.export_thread.start()
+                self.status_bar.showMessage("Export thread started...")
+            except Exception as start_error:
+                print(f"Error starting export thread: {start_error}")
+                QMessageBox.critical(self, "Thread Error", f"Failed to start export thread: {start_error}")
+                
+                # Cleanup and return
+                if hasattr(self, 'progress_dialog') and self.progress_dialog:
+                    self.progress_dialog.close()
+                if hasattr(self.control_panel, 'state_manager'):
+                    self.control_panel.state_manager.transition('unlock_ui')
+                if hasattr(self, 'export_worker'):
+                    self.export_worker.deleteLater()
+                if hasattr(self, 'export_thread'):
+                    self.export_thread.deleteLater()
+                return
             
         except Exception as e:
+            print(f"Error in export_scientific_plot: {e}")
+            import traceback
+            traceback.print_exc()
+            
             self.status_bar.showMessage(f"Error exporting plot: {str(e)}")
             QMessageBox.critical(self, "Export Error", f"Failed to export plot: {str(e)}")
             
             # Ensure UI is unlocked in case of error
             if hasattr(self.control_panel, 'state_manager'):
                 self.control_panel.state_manager.transition('unlock_ui')
+            
+            # Close progress dialog if it exists
+            if hasattr(self, 'progress_dialog') and self.progress_dialog:
+                self.progress_dialog.close()
+    
+    # Worker class inside the MainWindow class
+    class ExportWorker(QObject):
+        finished = pyqtSignal(bool, str)
+        progress = pyqtSignal(float)
+        
+        def __init__(self, file_path, heatmap_data, params):
+            super().__init__()
+            self.file_path = file_path
+            self.heatmap_data = heatmap_data
+            self.params = params
+            self.cancelled = False
+        
+        def run(self):
+            try:
+                from utils.visualization import save_scientific_visualization
+                
+                # Define a cancellation check function
+                def check_cancelled():
+                    # Return True if export should be cancelled
+                    return self.cancelled
+                
+                # Call the visualization function with cancellation support
+                success = save_scientific_visualization(
+                    self.file_path,
+                    self.heatmap_data,
+                    self.params['max_range'],
+                    self.params['target_distance'],
+                    self.params['circle_distance'],
+                    self.params['circle_radius'],
+                    self.params['circle_interval'],
+                    self.params['config_name'],
+                    self.params['noise_floor'],
+                    self.params['smoothing_sigma'],
+                    self.params['colormap'],
+                    self.params['visualization_mode'],
+                    progress_callback=lambda p: self.progress.emit(p),
+                    cancellation_check=check_cancelled
+                )
+                
+                # Check if we were cancelled during execution
+                if self.cancelled:
+                    self.finished.emit(False, "Operation cancelled by user")
+                    return
+                
+                # Check if visualization failed
+                if not success:
+                    self.finished.emit(False, "Visualization process failed")
+                    return
+                
+                self.finished.emit(True, self.file_path)
+            except Exception as e:
+                print(f"Error in export thread: {e}")
+                import traceback
+                traceback.print_exc()
+                self.finished.emit(False, str(e))
+    
+    def cancel_export(self):
+        """Handle user cancellation of export process."""
+        if hasattr(self, 'export_worker'):
+            self.export_worker.cancelled = True
+            self.status_bar.showMessage("Cancelling export...")
+        self.terminate_export_thread()
+    
+    @pyqtSlot(float)
+    def update_export_progress(self, progress):
+        """Update the export progress dialog.
+        
+        Args:
+            progress: Progress value between 0.0 and 1.0
+        """
+        if hasattr(self, 'progress_dialog') and self.progress_dialog:
+            self.progress_dialog.setValue(int(progress * 100))
+            
+            # Update the label text to provide more feedback
+            if progress < 0.1:
+                self.progress_dialog.setLabelText("Initializing export...")
+            elif progress < 0.3:
+                self.progress_dialog.setLabelText("Preparing data...")
+            elif progress < 0.6:
+                self.progress_dialog.setLabelText("Generating visualization...")
+            elif progress < 0.9:
+                self.progress_dialog.setLabelText("Applying finishing touches...")
+            else:
+                self.progress_dialog.setLabelText("Saving file...")
+    
+    def check_export_timeout(self):
+        """Check if the export operation has timed out."""
+        if hasattr(self, 'export_thread') and self.export_thread.isRunning():
+            reply = QMessageBox.question(
+                self, "Export Taking Too Long",
+                "The export operation is taking longer than expected. Wait longer?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes
+            )
+            
+            if reply == QMessageBox.No:
+                self.terminate_export_thread()
+            else:
+                # User wants to wait longer
+                self.export_timeout_timer.start(30000)  # 30 more seconds
+    
+    def terminate_export_thread(self):
+        """Forcefully terminate the export thread."""
+        if hasattr(self, 'export_thread') and self.export_thread.isRunning():
+            # Try to quit normally first
+            self.export_thread.quit()
+            
+            # If thread doesn't quit within 3 seconds, terminate it
+            if not self.export_thread.wait(3000):
+                self.export_thread.terminate()
+            
+            self.cleanup_export_thread()
+            
+            # Show message and clean up UI
+            self.status_bar.showMessage("Export operation canceled")
+            
+            if hasattr(self.control_panel, 'state_manager'):
+                self.control_panel.state_manager.transition('unlock_ui')
+            
+            if hasattr(self, 'progress_dialog') and self.progress_dialog:
+                self.progress_dialog.close()
+    
+    def cleanup_export_thread(self):
+        """Clean up export thread resources."""
+        # Stop timeout timer if it's running
+        if hasattr(self, 'export_timeout_timer') and self.export_timeout_timer.isActive():
+            self.export_timeout_timer.stop()
+        
+        # Clean up worker and thread
+        if hasattr(self, 'export_worker'):
+            self.export_worker.deleteLater()
+        
+        if hasattr(self, 'export_thread'):
+            self.export_thread.deleteLater()
     
     def on_export_completed(self, success, result):
         """
@@ -892,6 +1261,14 @@ class MainWindow(QMainWindow):
             success: Whether the export was successful
             result: File path if successful, error message if not
         """
+        # Close progress dialog
+        if hasattr(self, 'progress_dialog') and self.progress_dialog:
+            self.progress_dialog.close()
+        
+        # Stop timeout timer if it's running
+        if hasattr(self, 'export_timeout_timer') and self.export_timeout_timer.isActive():
+            self.export_timeout_timer.stop()
+        
         # Unlock the UI
         if hasattr(self.control_panel, 'state_manager'):
             self.control_panel.state_manager.transition('unlock_ui')
@@ -2286,3 +2663,47 @@ class MainWindow(QMainWindow):
                     QMessageBox.critical(self, "Error", f"Error saving data: {str(e)}")
             else:
                 QMessageBox.warning(self, "Error", "Analyzer not initialized or no data to save.")
+    
+    def on_distance_calculation_changed(self, checked):
+        """Handle change in distance calculation method radio button."""
+        if not checked:  # Only process when a button is checked (not unchecked)
+            return
+            
+        # Update the analyzer parameter
+        if hasattr(self.analyzer, 'params'):
+            if self.directional_radio.isChecked():
+                self.analyzer.params.use_directional_distance = True
+                self.status_bar.showMessage("Using directional (forward) distance calculation", 3000)
+            else:
+                self.analyzer.params.use_directional_distance = False
+                self.status_bar.showMessage("Using Euclidean (radial) distance calculation", 3000)
+            
+            # Log the change
+            self.analyzer.get_logger().info(
+                f"Distance calculation method changed to: {'directional' if self.analyzer.params.use_directional_distance else 'Euclidean'}"
+            )
+    
+    @pyqtSlot(int)
+    def handle_tab_change(self, tab_index):
+        """
+        Handle tab change event to manage views.
+        
+        When the combined view tab is selected, ensure both 
+        scatter and heatmap views are properly set in the combined view.
+        
+        Args:
+            tab_index: Index of the selected tab.
+        """
+        # Get tab widget
+        tabs = self.central_widget.findChild(QTabWidget)
+        if not tabs:
+            return
+        
+        # Get the selected tab
+        selected_tab = tabs.widget(tab_index)
+        
+        # Check if the combined view tab is selected
+        if isinstance(selected_tab, CombinedView):
+            # Ensure views are set in combined view
+            self.combined_view.set_views(self.scatter_view, self.heatmap_view)
+            self.status_bar.showMessage("Combined view mode: Use checkboxes to toggle individual views")

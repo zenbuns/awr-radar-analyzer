@@ -131,13 +131,17 @@ def generate_comparison_report(analyzer) -> str:
                 f.write(f"<h3>Configuration: {config}</h3>")
 
                 for distance, results in distances.items():
+                    # Get distance calculation method
+                    distance_method = "Directional (Forward)" if results.get('using_directional_distance', False) else "Radial (Euclidean)"
+                    
                     f.write(f"""
                         <div class="chart-container">
                             <h4>Target Distance: {distance}m</h4>
                             <p>Total Points: {results.get('total_points', 0)}</p>
                             <p>Average Intensity: {results.get('avg_intensity', 0):.2f}</p>
 
-                            <h5>Distance Band Analysis</h5>
+                            <h5>Distance Band Analysis (All {results.get('frames_analyzed', 'Available')} Frames)</h5>
+                            <p><em>Distance calculation method: {distance_method}</em></p>
                             <table>
                                 <tr>
                                     <th>Distance Band</th>

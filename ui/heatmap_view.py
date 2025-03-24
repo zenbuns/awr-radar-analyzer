@@ -144,8 +144,8 @@ class HeatmapView(QWidget):
             fraction=0.03,
             pad=0.02
         )
-        colorbar.ax.tick_params(labelsize=8, colors='#AACCEE')
-        colorbar.set_label('Signal Intensity (dB)', size=9, color='#BBDDFF')
+        colorbar.ax.tick_params(labelsize=10, colors='#AACCEE')
+        colorbar.set_label('Signal Intensity (dB)', size=12, color='#BBDDFF')
         self.components['colorbar'] = colorbar
         
         # Define range arcs with scientific precision
@@ -187,7 +187,7 @@ class HeatmapView(QWidget):
             if 0 < r <= self.max_range:
                 self.ax.text(
                     r * 0.05, r, f"{int(r)}m", ha='left', va='bottom',
-                    color='#AABBDD', fontsize=7, fontweight='normal',
+                    color='#AABBDD', fontsize=10, fontweight='normal',
                     bbox=dict(facecolor='#050510', edgecolor='none', 
                              alpha=0.7, pad=1, boxstyle='round,pad=0.1')
                 )
@@ -268,7 +268,7 @@ class HeatmapView(QWidget):
             self.ax.text(
                 x_label, y_label, f"{angle}°", 
                 color='#99BBDD',
-                fontsize=7,
+                fontsize=10,
                 ha='center', 
                 va='center',
                 bbox=dict(facecolor='#050510', edgecolor='none', alpha=0.7, boxstyle='round,pad=0.1')
@@ -300,10 +300,10 @@ class HeatmapView(QWidget):
             theta1=0,
             theta2=180,
             fill=False,
-            color='#FF5566',  # Scientific red
+            color='white',  # Changed from red to white
             linestyle='-',
-            linewidth=1.0,
-            alpha=0.7
+            linewidth=0.4,  # Reduced from 1.0 to make thinner
+            alpha=0.5       # Reduced from 0.7 to make more subtle
         )
         self.ax.add_patch(self.components['target_arc'])
         
@@ -339,20 +339,6 @@ class HeatmapView(QWidget):
             )
             self.ax.add_patch(sampling_circle)
             
-            # Add small targeting crosshairs at center of sampling circle
-            if config['enabled']:
-                crosshair_size = 0.3
-                self.ax.plot(
-                    [x_pos-crosshair_size, x_pos+crosshair_size], 
-                    [y_pos, y_pos], 
-                    color=config['color'], linewidth=0.4, alpha=0.6
-                )
-                self.ax.plot(
-                    [x_pos, x_pos], 
-                    [y_pos-crosshair_size, y_pos+crosshair_size], 
-                    color=config['color'], linewidth=0.4, alpha=0.6
-                )
-            
             self.components[f'sampling_circle_{i}'] = sampling_circle
             self.components['sampling_circles'].append({
                 'circle': sampling_circle,
@@ -372,13 +358,13 @@ class HeatmapView(QWidget):
         self.ax.set_ylim(0, self.max_range)
         
         # Add labels with scientific radar terminology
-        self.ax.set_xlabel('Azimuth (m)', fontsize=9, labelpad=8, color='#BBDDFF')
-        self.ax.set_ylabel('Range (m)', fontsize=9, labelpad=8, color='#BBDDFF')
-        self.ax.set_title('Radar Intensity Map', fontsize=11, color='#DDEEFF', weight='normal')
+        self.ax.set_xlabel('Azimuth (m)', fontsize=12, labelpad=8, color='#BBDDFF')
+        self.ax.set_ylabel('Range (m)', fontsize=12, labelpad=8, color='#BBDDFF')
+        self.ax.set_title('Radar Intensity Map', fontsize=14, color='#DDEEFF', weight='normal')
         
         # Configure ticks with scientific styling
-        self.ax.tick_params(axis='x', colors='#AABBDD', labelsize=8)
-        self.ax.tick_params(axis='y', colors='#AABBDD', labelsize=8)
+        self.ax.tick_params(axis='x', colors='#AABBDD', labelsize=10)
+        self.ax.tick_params(axis='y', colors='#AABBDD', labelsize=10)
         
         # Set spine colors for scientific border
         for spine in self.ax.spines.values():
@@ -397,7 +383,7 @@ class HeatmapView(QWidget):
             0.98, 0.98, res_text,
             transform=self.ax.transAxes,
             color='#AABBDD',
-            fontsize=7,
+            fontsize=10,
             ha='right',
             va='top',
             bbox=dict(
@@ -413,7 +399,7 @@ class HeatmapView(QWidget):
             0.02, 0.02, 'SNR: N/A',
             transform=self.ax.transAxes,
             color='#EEDD66',
-            fontsize=8,
+            fontsize=11,
             bbox=dict(
                 boxstyle='round,pad=0.2',
                 facecolor='#101025',
@@ -788,10 +774,10 @@ class HeatmapView(QWidget):
                 theta1=0,
                 theta2=180,
                 fill=False,
-                color='#FF5566',  # Scientific red
+                color='white',  # Changed from red to white
                 linestyle='-',
-                linewidth=1.0,  # Slightly thinner but still visible
-                alpha=0.7      # More transparent
+                linewidth=0.4,  # Reduced from 1.0 to make thinner
+                alpha=0.5       # Reduced from 0.7 to make more subtle
             )
             self.ax.add_patch(self.components['target_arc'])
             self.canvas.draw_idle()
@@ -1017,7 +1003,7 @@ class HeatmapView(QWidget):
                 center_y + radius + 0.5,  # Adjust position for better visibility
                 stats_text,
                 color='#CCDDEE',
-                fontsize=8,
+                fontsize=10,
                 bbox=dict(
                     boxstyle='round,pad=0.3',
                     facecolor='#101025',
