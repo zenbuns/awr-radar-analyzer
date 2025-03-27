@@ -92,12 +92,30 @@ class ControlPanel(QWidget):
         Initialize the ControlPanel widget.
         
         Args:
-            parent: Parent widget (optional). If provided, this should be the main window instance.
+            parent: Parent widget (optional).
         """
         super().__init__(parent)
         
-        # Store reference to the main window
+        # Store reference to main window
         self.main_window = parent
+        
+        # Default values
+        self.collection_start_time = None
+        self.collection_duration = 60
+        self.last_point_count = 0
+        self.collection_frames = 0
+        self.point_update_counter = 0
+        self.point_history = []
+        self.bag_started_for_generation = False
+        self.manual_stop_requested = False  # Track if collection was manually stopped
+        
+        # Initialize the state manager
+        from ui.state_manager import ApplicationStateManager
+        self.state_manager = ApplicationStateManager(self)
+        
+        # Set up progress update timer
+        self.progress_timer = QTimer(self)
+        self.progress_timer.timeout.connect(self.update_progress)
         
         # Create a folder to store application settings
         self.settings_dir = os.path.join(os.path.expanduser("~"), ".radar_analyzer")
@@ -112,26 +130,8 @@ class ControlPanel(QWidget):
         self.status_timer.setSingleShot(True)
         self.status_timer.timeout.connect(self.clear_status)
         
-        # Track if bag playback was started for data generation
-        self.bag_started_for_generation = False
-        
-        # Point counter tracking for throttling
-        self.last_point_count = 0
-        self.point_update_counter = 0
-        self.point_history = []  # Store last 10 frame point counts
-        
-        # Create UI components
+        # Set up the UI
         self.setup_ui()
-        
-        # Initialize state manager for robust UI state management
-        from ui.state_manager import ApplicationStateManager
-        self.state_manager = ApplicationStateManager(self)
-        
-        # Initialize timer for progress updates
-        self.progress_timer = QTimer(self)
-        self.progress_timer.timeout.connect(self.update_progress)
-        self.collection_start_time = None
-        self.collection_duration = 60  # seconds
     
     def setup_ui(self):
         """Set up the widget UI components."""
@@ -1565,6 +1565,9 @@ class ControlPanel(QWidget):
     
     def _start_collection_from_bag(self):
         """Start data collection when playing a bag with 'Generate from Bag' checked."""
+        # Reset manual stop flag since we're explicitly starting collection
+        self.manual_stop_requested = False
+        
         # Set flag to track that bag playback was started for data generation
         self.bag_started_for_generation = True
         
@@ -1677,17 +1680,19 @@ class ControlPanel(QWidget):
             self.recording_status_label.setStyleSheet("font-weight: bold; color: #757575;")
         
         # Check if we should restart the bag playback for data generation
-        if self.bag_started_for_generation and hasattr(self, 'generate_from_bag_check'):
-            if self.generate_from_bag_check.isChecked():
-                # Reset the heatmap for a new iteration
-                self.reset_heatmap.emit()
-                
-                # Restart bag playback
-                QTimer.singleShot(500, self._restart_bag_and_collection)
-            else:
-                self.bag_started_for_generation = False
-                self.set_status("Bag playback complete")
+        # Don't restart if collection was manually stopped
+        if (self.bag_started_for_generation and 
+            hasattr(self, 'generate_from_bag_check') and 
+            self.generate_from_bag_check.isChecked() and
+            not self.manual_stop_requested):
+            
+            # Reset the heatmap for a new iteration
+            self.reset_heatmap.emit()
+            
+            # Restart bag playback
+            QTimer.singleShot(500, self._restart_bag_and_collection)
         else:
+            self.bag_started_for_generation = False
             self.set_status("Bag playback complete")
     
     def reset_point_counter(self):
@@ -1969,34 +1974,22 @@ class ControlPanel(QWidget):
     
     def on_start_collection(self):
         """Handle start collection button click."""
-        config_name = self.config_entry.text().strip()
-        if not config_name:
-            self.set_status("Please enter a configuration name")
-            return
+        # Use state manager to handle UI updates if defined
+        if hasattr(self, 'state_manager'):
+            self.state_manager.transition('start_collection')
         
+        # Reset manual stop flag when starting a new collection
+        self.manual_stop_requested = False
+        
+        # Get parameters
+        config_name = self.config_entry.text().strip() or "unnamed_config"
         target_distance = self.target_combo.currentText()
-        duration = self.duration_spin.value()
-        
-        # Use state manager to handle UI updates
-        self.state_manager.transition('start_collection')
+        duration = int(self.duration_spin.value())
         
         # Emit signal to start collection
         self.start_collection.emit(config_name, target_distance, duration)
         
-        # Reset all collection stats
-        self.progress_bar.setValue(0)
-        self.points_collected_label.setText("Points: 0")
-        self.collection_time_label.setText("Time: 00:00")
-        
-        # Create a green status indicator
-        status_pixmap = QPixmap(16, 16)
-        status_pixmap.fill(QColor(76, 175, 80))
-        status_icon_widgets = self.findChildren(QLabel, "status_icon")
-        if status_icon_widgets:
-            status_icon_widgets[0].setPixmap(status_pixmap)
-        
-        # Store current time and duration for progress calculations
-        from PyQt5.QtCore import QDateTime
+        # Update UI
         self.collection_start_time = QDateTime.currentDateTime()
         self.collection_duration = duration
         
@@ -2009,6 +2002,9 @@ class ControlPanel(QWidget):
     
     def on_stop_collection(self):
         """Handle stop collection button click."""
+        # Mark that collection was manually stopped
+        self.manual_stop_requested = True
+        
         self.stop_collection.emit()
         
         # Use state manager to handle UI updates
@@ -2270,6 +2266,14 @@ class ControlPanel(QWidget):
         self.state_manager.transition('start_generating_report')
         
         try:
+            # Ensure bag playback doesn't restart automatically
+            self.bag_started_for_generation = False
+            self.manual_stop_requested = True
+            
+            # If the generate_from_bag_check is checked, uncheck it to prevent restart
+            if hasattr(self, 'generate_from_bag_check') and self.generate_from_bag_check.isChecked():
+                self.generate_from_bag_check.setChecked(False)
+            
             # Emit signal to generate report
             self.generate_report.emit()
             self.set_status("Generating report...")
@@ -2279,7 +2283,7 @@ class ControlPanel(QWidget):
             
             # Reset state on error
             self.state_manager.transition('stop_generating_report')
-            
+    
     def on_report_completed(self, success=True, report_path=None):
         """
         Handle report generation completion.

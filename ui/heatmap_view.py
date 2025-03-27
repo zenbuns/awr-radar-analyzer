@@ -494,11 +494,34 @@ class HeatmapView(QWidget):
             if 'contour' in self.components and self.components['contour'] is not None:
                 # Only remove if we're switching modes or updating contours
                 if self.visualization_mode not in ['contour', 'combined'] or self.optimizer.should_update_contours():
-                    for coll in self.components['contour'].collections:
-                        try:
-                            coll.remove()
-                        except Exception:
-                            pass
+                    # FIX: Handle case where contour object doesn't have collections attribute
+                    try:
+                        if hasattr(self.components['contour'], 'collections'):
+                            for coll in self.components['contour'].collections:
+                                try:
+                                    coll.remove()
+                                except Exception:
+                                    pass
+                        else:
+                            # Alternative approach: clear the axes and safely remove collections
+                            # FIXED: Don't use direct assignment to ax.collections
+                            collections_to_remove = [c for c in self.ax.collections if c != self.components['contour']]
+                            for coll in collections_to_remove:
+                                try:
+                                    coll.remove()
+                                except Exception as e:
+                                    print(f"Error removing specific collection: {e}")
+                    except Exception as e:
+                        print(f"Error clearing contours: {e}")
+                        # Fallback: safely remove collections one by one
+                        if hasattr(self.ax, 'collections') and len(self.ax.collections) > 0:
+                            while len(self.ax.collections) > 0:
+                                try:
+                                    self.ax.collections[0].remove()
+                                except Exception as e:
+                                    print(f"Error in fallback collection removal: {e}")
+                                    break
+                    
                     self.components['contour'] = None
             
             # Only update contours if the visualization mode requires it and the optimizer allows it
@@ -552,7 +575,16 @@ class HeatmapView(QWidget):
         Args:
             mode: Visualization mode ('heatmap', 'contour', or 'combined').
         """
+        # If we're switching away from a contour mode, we need to be extra careful
+        switching_from_contour = (self.visualization_mode in ['contour', 'combined'] and 
+                                 mode not in ['contour', 'combined'])
+        
+        # Update the mode
         if mode in ['heatmap', 'contour', 'combined']:
+            # Store old mode for comparison
+            old_mode = self.visualization_mode
+            
+            # Set new mode
             self.visualization_mode = mode
             
             # Adjust optimizer settings based on visualization mode
@@ -570,12 +602,55 @@ class HeatmapView(QWidget):
                 self.optimizer.set_update_interval(0.1)
                 self.optimizer.set_contour_interval(0.5)
                 self.optimizer.set_max_fps(20)
-                
+            
+            # Handle switching from contour mode - clear all contours safely
+            if switching_from_contour:
+                try:
+                    # Safely clear the contour reference first
+                    self.components['contour'] = None
+                    
+                    # Safely remove all collections from the axes
+                    if hasattr(self, 'ax') and self.ax is not None:
+                        # Make a copy of the collections to safely iterate
+                        if hasattr(self.ax, 'collections'):
+                            # Use a safer approach: remove collections one by one
+                            while len(self.ax.collections) > 0:
+                                try:
+                                    # Always remove the first collection until none left
+                                    if len(self.ax.collections) > 0:
+                                        self.ax.collections[0].remove()
+                                except Exception as e:
+                                    print(f"Error removing collection: {e}")
+                                    # If we can't remove it normally, try to break the loop
+                                    # to avoid infinite loops
+                                    break
+                        
+                    # Force a canvas redraw to clear remnants
+                    self.canvas.draw()
+                except Exception as e:
+                    print(f"Error while clearing contours during mode switch: {e}")
+            
             # Update display with current data if available
             if self.heatmap_data is not None:
                 data_thresholded = self.heatmap_data.copy()
                 data_thresholded[data_thresholded < self.noise_floor] = 0
-                self._update_visualization_mode(data_thresholded, True)
+                
+                # Use different approach based on whether we're switching from contour mode
+                if switching_from_contour:
+                    # Just update the heatmap component directly
+                    if 'heatmap' in self.components and self.components['heatmap'] is not None:
+                        self.components['heatmap'].set_data(data_thresholded)
+                        
+                        # Make sure visibility matches the new mode
+                        self.components['heatmap'].set_visible(mode in ['heatmap', 'combined'])
+                        alpha = 0.95 if mode == 'heatmap' else 0.6
+                        self.components['heatmap'].set_alpha(alpha)
+                        
+                        # Force a redraw
+                        self.canvas.draw_idle()
+                else:
+                    # Use normal update for other mode transitions
+                    self._update_visualization_mode(data_thresholded, True)
     
     def configure_optimizer(self, update_interval=None, contour_interval=None, max_fps=None):
         """
@@ -985,8 +1060,50 @@ class HeatmapView(QWidget):
         # Create clean heatmap data
         self.heatmap_data = np.zeros((grid_size, grid_size), dtype=np.float32)
         
-        # Update the display
-        self.update_heatmap_data(self.heatmap_data)
+        # Safe approach to clear contours
+        try:
+            # Clear contour reference first
+            if 'contour' in self.components:
+                self.components['contour'] = None
+                
+            # Safely remove all collections without direct assignment
+            if hasattr(self, 'ax') and self.ax is not None:
+                if hasattr(self.ax, 'collections'):
+                    # Remove collections one by one until none left
+                    while len(self.ax.collections) > 0:
+                        try:
+                            # Always remove the first collection
+                            if len(self.ax.collections) > 0:
+                                self.ax.collections[0].remove()
+                        except Exception as e:
+                            print(f"Error removing collection: {e}")
+                            # If we can't remove normally, break to avoid infinite loop
+                            break
+                
+            # Force a full redraw to ensure clean slate
+            self.canvas.draw()
+        except Exception as e:
+            print(f"Error during contour cleanup: {e}")
+        
+        # Just update the heatmap data directly
+        if 'heatmap' in self.components and self.components['heatmap'] is not None:
+            try:
+                self.components['heatmap'].set_data(self.heatmap_data)
+                
+                # Make sure visibility matches the current mode
+                self.components['heatmap'].set_visible(self.visualization_mode in ['heatmap', 'combined'])
+                alpha = 0.95 if self.visualization_mode == 'heatmap' else 0.6
+                self.components['heatmap'].set_alpha(alpha)
+                
+                # Force a redraw
+                self.canvas.draw_idle()
+            except Exception as e:
+                print(f"Error updating heatmap during reset: {e}")
+                # If direct update fails, try recreating the plot
+                self.setup_plot()
+        else:
+            # If no heatmap component exists, recreate the plot
+            self.setup_plot()
         
         # Reset optimizer state
         if hasattr(self, 'optimizer'):

@@ -1284,6 +1284,81 @@ class RadarPointCloudAnalyzer(Node):
         except Exception as e:
             self.get_logger().error(f"Error during PCL hard reset: {str(e)}")
             
+    def reset_live_heatmap(self) -> None:
+        """
+        Reset only the live heatmap data while preserving other data structures.
+        
+        This method specifically clears the live_heatmap_data array to reset
+        the real-time decaying heatmap visualization, without affecting other
+        data structures or the persistent heatmap.
+        """
+        try:
+            with self.data_lock:
+                # Reset only the live heatmap data
+                grid_size = calculate_heatmap_size(self.params)
+                self.live_heatmap_data = np.zeros(grid_size, dtype=np.float32)
+                
+                # Safely clear contours without direct collections assignment
+                if 'ax' in self.heatmap_viz and self.heatmap_viz['ax'] is not None:
+                    try:
+                        # First, clear the contour reference
+                        old_contour = self.heatmap_viz.get('contour', None)
+                        self.heatmap_viz['contour'] = None
+                        
+                        # Safely remove collections one by one
+                        ax = self.heatmap_viz['ax']
+                        if hasattr(ax, 'collections'):
+                            # If we have a specific contour object with collections, remove those first
+                            try:
+                                if old_contour is not None and hasattr(old_contour, 'collections'):
+                                    for coll in old_contour.collections:
+                                        try:
+                                            coll.remove()
+                                        except Exception as e:
+                                            self.get_logger().debug(f"Error removing specific contour collection: {str(e)}")
+                            except Exception as e:
+                                self.get_logger().debug(f"Error handling contour collections: {str(e)}")
+                                
+                            # Remove remaining collections one by one as a fallback
+                            while len(ax.collections) > 0:
+                                try:
+                                    # Always remove the first collection
+                                    ax.collections[0].remove()
+                                except Exception as e:
+                                    self.get_logger().debug(f"Error removing collection: {str(e)}")
+                                    # Break the loop to prevent infinite looping
+                                    break
+                        
+                        # Force a canvas redraw to ensure clean state
+                        if 'fig' in self.heatmap_viz and self.heatmap_viz['fig'] is not None:
+                            if hasattr(self.heatmap_viz['fig'].canvas, 'draw'):
+                                self.heatmap_viz['fig'].canvas.draw()
+                    except Exception as e:
+                        self.get_logger().debug(f"Error clearing contours during reset: {str(e)}")
+                
+                # Update heatmap data if present
+                if 'heatmap' in self.heatmap_viz and self.heatmap_viz['heatmap'] is not None:
+                    try:
+                        self.heatmap_viz['heatmap'].set_data(self.live_heatmap_data)
+                        
+                        # Draw using idle for better performance
+                        if 'fig' in self.heatmap_viz and self.heatmap_viz['fig'] is not None:
+                            if hasattr(self.heatmap_viz['fig'].canvas, 'draw_idle'):
+                                self.heatmap_viz['fig'].canvas.draw_idle()
+                    except Exception as e:
+                        self.get_logger().debug(f"Error updating heatmap data: {str(e)}")
+                
+                # Emit a signal to notify UI components
+                try:
+                    self.signals.data_reset_signal.emit()
+                    self.get_logger().debug("Emitted reset_heatmap signal to ensure clean state")
+                except Exception as e:
+                    self.get_logger().debug(f"Failed to emit reset signal: {str(e)}")
+                
+                self.get_logger().info("Reset live heatmap data")
+        except Exception as e:
+            self.get_logger().error(f"Error resetting live heatmap: {str(e)}")
+            
     def play_rosbag(self, bag_path: str, loop: bool = False) -> bool:
         """
         Play a ROS2 bag file.

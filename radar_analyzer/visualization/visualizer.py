@@ -512,11 +512,41 @@ def update_heatmap_display(analyzer, frame: int) -> None:
             
             # Update contours even less frequently
             if frame % 20 == 0 and analyzer.heatmap_viz['contour_levels'] > 0:  # Reduced frequency
-                # Remove old contours
+                # Safely remove old contours
                 if analyzer.heatmap_viz['contour'] is not None:
-                    for coll in analyzer.heatmap_viz['contour'].collections:
-                        coll.remove()
-                    analyzer.heatmap_viz['contour'] = None
+                    try:
+                        # Clear contour reference first
+                        old_contour = analyzer.heatmap_viz['contour']
+                        analyzer.heatmap_viz['contour'] = None
+                        
+                        # If axis exists, clear collections safely
+                        ax = analyzer.heatmap_viz['ax']
+                        if ax is not None and hasattr(ax, 'collections'):
+                            # First try to identify and remove specific contour collections
+                            if hasattr(old_contour, 'collections'):
+                                try:
+                                    for coll in old_contour.collections:
+                                        try:
+                                            if coll in ax.collections:
+                                                coll.remove()
+                                        except Exception as e:
+                                            analyzer.get_logger().debug(f"Error removing specific collection: {str(e)}")
+                                except Exception as e:
+                                    analyzer.get_logger().debug(f"Error processing contour collections: {str(e)}")
+                            
+                            # Fallback: remove collections one by one
+                            # Only if we still have collections and couldn't identify specific ones
+                            remaining_attempts = 10  # Limit removal attempts to prevent infinite loops
+                            while len(ax.collections) > 0 and remaining_attempts > 0:
+                                try:
+                                    ax.collections[0].remove()
+                                    remaining_attempts -= 1
+                                except Exception as e:
+                                    analyzer.get_logger().debug(f"Error removing collection: {str(e)}")
+                                    # Break immediately to avoid getting stuck
+                                    break
+                    except Exception as e:
+                        analyzer.get_logger().debug(f"Error clearing contours: {str(e)}")
                 
                 # Create new contours
                 nonzero_count = np.count_nonzero(heatmap_data_thresholded)
@@ -532,19 +562,23 @@ def update_heatmap_display(analyzer, frame: int) -> None:
                                 analyzer.heatmap_viz['contour_levels']
                             )
                             
-                            # Add contours
-                            analyzer.heatmap_viz['contour'] = analyzer.heatmap_viz['ax'].contour(
-                                downsampled,
-                                levels=levels,
-                                extent=[-analyzer.params.max_range, 
-                                       analyzer.params.max_range, 
-                                       0, analyzer.params.max_range],
-                                colors='white',
-                                alpha=0.4,
-                                linewidths=0.5
-                            )
+                            # Check if levels are valid
+                            if len(levels) > 1 and levels[-1] > levels[0]:
+                                # Add contours
+                                analyzer.heatmap_viz['contour'] = analyzer.heatmap_viz['ax'].contour(
+                                    downsampled,
+                                    levels=levels,
+                                    extent=[-analyzer.params.max_range, 
+                                           analyzer.params.max_range, 
+                                           0, analyzer.params.max_range],
+                                    colors='white',
+                                    alpha=0.4,
+                                    linewidths=0.5
+                                )
+                            else:
+                                analyzer.get_logger().debug(f"Invalid contour levels: min={levels[0]}, max={levels[-1]}")
                     except Exception as e:
-                        analyzer.get_logger().debug(f"Error updating contours: {str(e)}")
+                        analyzer.get_logger().debug(f"Error creating contours: {str(e)}")
                     
     except Exception as e:
         analyzer.get_logger().error(f"Error updating heatmap display: {str(e)}")
