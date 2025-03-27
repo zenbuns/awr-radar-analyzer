@@ -175,3 +175,26 @@ class ScatterOptimizer:
             
         if max_fps is not None:
             self.set_max_fps(max_fps) 
+        
+    def optimize_points(self, x, y, intensities):
+        """
+        Optimize point data for display, applying downsampling if needed.
+        
+        Args:
+            x: X-coordinates array.
+            y: Y-coordinates array.
+            intensities: Intensity values array.
+            
+        Returns:
+            Tuple of (x, y, intensities) after optimization.
+        """
+        # Store the point count for reference
+        self.last_point_count = len(x)
+        
+        # Check if update should occur based on timing and point count
+        if not self.should_update(len(x)):
+            # Return empty arrays if we should skip update
+            return np.array([]), np.array([]), np.array([])
+        
+        # Apply downsampling if needed
+        return self.downsample(x, y, intensities) 

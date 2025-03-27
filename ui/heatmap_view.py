@@ -98,55 +98,106 @@ class HeatmapView(QWidget):
         """Set up the heatmap plot with initial components."""
         # Create initial heatmap data if not existing
         if self.heatmap_data is None:
-            grid_size = int(2 * self.max_range / 0.5)  # Higher resolution: 0.5m instead of 1.0m
-            # Ensure grid size is even for better memory alignment
+            # Simple grid size calculation with no special resolution
+            grid_size = int(2 * self.max_range)  # 1 meter per pixel
             if grid_size % 2 == 1:
                 grid_size += 1
             self.heatmap_data = np.zeros((grid_size, grid_size), dtype=np.float32)
         
-        # Create axis
+        # Clear existing axis
+        if hasattr(self, 'ax') and self.ax is not None:
+            self.figure.clear()
+        
+        # Create new axis
         self.ax = self.figure.add_subplot(111)
         
-        # Set scientific background color - deeper blue for more contrast
-        self.ax.set_facecolor('#050510')  # Deeper navy blue scientific background
+        # Use the exact same background as the scatter plot
+        self.ax.set_facecolor('#050510')
         self.figure.patch.set_facecolor('#050510')
         
-        # Use equal aspect ratio to keep circles circular
+        # Force equal aspect ratio to match scatter plot
         self.ax.set_aspect('equal')
         
-        # Create heatmap with improved scientific colormap
-        cmap = plt.cm.get_cmap('viridis').copy()
-        
-        # Adjust normalization for better visibility and contrast
+        # Use default viridis colormap for consistency
+        cmap = plt.cm.get_cmap('viridis')
         norm = colors.PowerNorm(gamma=0.5, vmin=self.noise_floor, vmax=1.0)
         
-        # Ensure correct extent values using max_range of 35.0 meters
+        # SIMPLEST POSSIBLE DISPLAY:
+        # - No transpose
+        # - Direct coordinate mapping
+        # - Same exact extent as scatter plot
         self.components['heatmap'] = self.ax.imshow(
-            self.heatmap_data,
+            self.heatmap_data,  # Use raw data, no transpose
             extent=[-self.max_range, self.max_range, 0, self.max_range],
-            origin='lower',
+            origin='lower',  # Origin at bottom left
             cmap=cmap,
             norm=norm,
-            aspect='auto',
             interpolation='bilinear',
             alpha=0.95
         )
         
+        # Match scatter plot labels exactly
+        self.ax.set_xlabel('Azimuth (m)')
+        self.ax.set_ylabel('Range (m)')
+        
+        # Force exact axis limits to match scatter plot
+        self.ax.set_xlim(-self.max_range, self.max_range)
+        self.ax.set_ylim(0, self.max_range)
+        
+        # Store components
         self.components['norm'] = norm
         self.components['contour'] = None
-        self.components['contour_levels'] = 12  # Increased precision levels
         
-        # Add colorbar with enhanced scientific styling
-        colorbar = self.figure.colorbar(
+        # Initialize sampling_circles list
+        self.components['sampling_circles'] = []
+        
+        # Create sampling circles with default configurations (same as in scatter_view)
+        circle_configs = [
+            {'enabled': True, 'distance': 5.0, 'radius': 0.5, 'angle': 0, 
+             'color': '#44DDFF', 'label': 'Primary'},
+            {'enabled': False, 'distance': 15.0, 'radius': 0.5, 'angle': -60, 
+             'color': '#77BBFF', 'label': 'Left'},
+            {'enabled': False, 'distance': 25.0, 'radius': 0.5, 'angle': 60, 
+             'color': '#FFDD66', 'label': 'Right'}
+        ]
+        
+        # Create the sampling circles
+        for i, config in enumerate(circle_configs):
+            # Calculate position based on distance and angle
+            angle_rad = config['angle'] * (3.14159 / 180.0)
+            x_pos = config['distance'] * np.sin(angle_rad)
+            y_pos = config['distance'] * np.cos(angle_rad)
+            
+            # Create circle
+            sampling_circle = Circle(
+                (x_pos, y_pos),
+                config['radius'],
+                fill=False,
+                color=config['color'],
+                linestyle='-',
+                linewidth=0.8,
+                alpha=0.8 if config['enabled'] else 0.3,
+                visible=config['enabled']
+            )
+            self.ax.add_patch(sampling_circle)
+            
+            # Store circle info
+            self.components[f'sampling_circle_{i}'] = sampling_circle
+            self.components['sampling_circles'].append({
+                'circle': sampling_circle,
+                'config': config,
+                'x_pos': x_pos,
+                'y_pos': y_pos
+            })
+        
+        # Add colorbar
+        self.components['colorbar'] = self.figure.colorbar(
             self.components['heatmap'],
             ax=self.ax,
             label='Signal Intensity (dB)',
             fraction=0.03,
             pad=0.02
         )
-        colorbar.ax.tick_params(labelsize=10, colors='#AACCEE')
-        colorbar.set_label('Signal Intensity (dB)', size=12, color='#BBDDFF')
-        self.components['colorbar'] = colorbar
         
         # Define range arcs with scientific precision
         circle_interval_m = 5  # 5-meter intervals for precision
@@ -178,7 +229,7 @@ class HeatmapView(QWidget):
                 theta1=0,
                 theta2=180,
                 fill=False,
-                color='#AABBDD',  # Even lighter scientific blue-gray
+                color='#AABBDD',
                 linestyle='-',
                 linewidth=0.6,
                 alpha=0.6
@@ -205,61 +256,30 @@ class HeatmapView(QWidget):
                 theta1=0,
                 theta2=180,
                 fill=False,
-                color='#7799CC',  # Lighter scientific blue
+                color='#7799CC',
                 linestyle=':',
                 linewidth=0.3,
                 alpha=0.4
             )
             self.ax.add_patch(arc)
         
-        # Add angle markers every 15 degrees for more precision (but skip previously excluded angles)
-        for angle in range(-90, 91, 15):
-            if angle == 0 or angle == -90 or angle == 90 or angle % 30 != 0:
-                # Skip 0, -90, 90 degrees and keep only 15° intervals not covered by 30° intervals
-                continue
-                
-            # Convert degrees to radians for calculations
-            angle_rad = np.radians(angle)
-            
-            # Calculate end points using parametric form
-            x_end = self.max_range * np.sin(angle_rad)
-            y_end = self.max_range * np.cos(angle_rad)
-            
-            # Draw angle line - thinner for 15° intervals
-            self.ax.plot(
-                [0, x_end], 
-                [0, y_end], 
-                linestyle=':',  # Dotted line for minor angles
-                color='#5566AA', 
-                linewidth=0.3, 
-                alpha=0.4
-            )
-        
-        # Add angle markers every 30 degrees with proper scientific labels (keep existing)
+        # Add angle markers every 30 degrees
         for angle in range(-90, 91, 30):
             if angle == 0 or angle == -90 or angle == 90:
-                # Skip 0 degrees, handled with sensor indicator
-                # Skip -90 and 90 degrees per user request
+                # Skip certain angles
                 continue
                 
-            # Convert degrees to radians for calculations
+            # Convert to radians
             angle_rad = np.radians(angle)
             
-            # Calculate end points using parametric form
+            # Calculate endpoints
             x_end = self.max_range * np.sin(angle_rad)
             y_end = self.max_range * np.cos(angle_rad)
             
             # Draw angle line
-            self.ax.plot(
-                [0, x_end], 
-                [0, y_end], 
-                linestyle='--', 
-                color='#7788BB', 
-                linewidth=0.5, 
-                alpha=0.6
-            )
+            self.ax.plot([0, x_end], [0, y_end], linestyle='--', color='#7788BB', linewidth=0.5, alpha=0.6)
             
-            # Label at 80% of max range to avoid crowding
+            # Add angle label at 80% of max range
             label_distance = 0.8 * self.max_range
             x_label = label_distance * np.sin(angle_rad)
             y_label = label_distance * np.cos(angle_rad)
@@ -274,106 +294,7 @@ class HeatmapView(QWidget):
                 bbox=dict(facecolor='#050510', edgecolor='none', alpha=0.7, boxstyle='round,pad=0.1')
             )
         
-        # Add enhanced radar crosshairs with tick marks
-        # Vertical line
-        self.ax.plot([0, 0], [0, self.max_range], color='#00DD88', alpha=0.4, linewidth=0.5)
-        
-        # Horizontal line segments with ticks every 5m
-        for x in range(-int(self.max_range), int(self.max_range)+1, 5):
-            if x == 0:
-                continue
-            tick_length = 0.5 if x % 10 == 0 else 0.25
-            self.ax.plot([x, x], [0, tick_length], color='#00DD88', alpha=0.3, linewidth=0.4)
-                
-        
-        
-        # Add target arc with scientific styling
-        self.components['target_arc'] = Arc(
-            (0, 0),
-            width=2 * self.target_distance,
-            height=2 * self.target_distance,
-            angle=0,
-            theta1=0,
-            theta2=180,
-            fill=False,
-            color='white',  # Changed from red to white
-            linestyle='-',
-            linewidth=0.4,  # Reduced from 1.0 to make thinner
-            alpha=0.5       # Reduced from 0.7 to make more subtle
-        )
-        self.ax.add_patch(self.components['target_arc'])
-        
-        # Create sampling circles with different positions and scientific colors
-        self.components['sampling_circles'] = []
-        
-        # Circle colors and positions - enhanced scientific color scheme
-        circle_configs = [
-            {'enabled': True, 'distance': 5.0, 'radius': 0.5, 'angle': 0, 
-             'color': '#44DDFF', 'label': 'Primary'},
-            {'enabled': False, 'distance': 15.0, 'radius': 0.5, 'angle': -60, 
-             'color': '#77BBFF', 'label': 'Left'},
-            {'enabled': False, 'distance': 25.0, 'radius': 0.5, 'angle': 60, 
-             'color': '#FFDD66', 'label': 'Right'}
-        ]
-        
-        for i, config in enumerate(circle_configs):
-            # Calculate x position based on angle (convert degrees to radians)
-            angle_rad = config['angle'] * (3.14159 / 180.0)
-            x_pos = config['distance'] * np.sin(angle_rad)
-            y_pos = config['distance'] * np.cos(angle_rad)
-            
-            # Create sampling circle with scientific styling
-            sampling_circle = Circle(
-                (x_pos, y_pos),
-                config['radius'],
-                fill=False,
-                color=config['color'],
-                linestyle='-',
-                linewidth=0.8,
-                alpha=0.8 if config['enabled'] else 0.2,
-                visible=config['enabled']
-            )
-            self.ax.add_patch(sampling_circle)
-            
-            self.components[f'sampling_circle_{i}'] = sampling_circle
-            self.components['sampling_circles'].append({
-                'circle': sampling_circle,
-                'config': config,
-                'x_pos': x_pos,
-                'y_pos': y_pos
-            })
-        
-        # Add roi indicators list for regions of interest
-        self.components['roi_indicators'] = []
-        
-        # Add grid for scientific precision - very subtle
-        self.ax.grid(True, color='#223344', linestyle=':', linewidth=0.2, alpha=0.3)
-        
-        # Set plot limits - ensure max_range is respected
-        self.ax.set_xlim(-self.max_range, self.max_range)
-        self.ax.set_ylim(0, self.max_range)
-        
-        # Add labels with scientific radar terminology
-        self.ax.set_xlabel('Azimuth (m)', fontsize=12, labelpad=8, color='#BBDDFF')
-        self.ax.set_ylabel('Range (m)', fontsize=12, labelpad=8, color='#BBDDFF')
-        self.ax.set_title('Radar Intensity Map', fontsize=14, color='#DDEEFF', weight='normal')
-        
-        # Configure ticks with scientific styling
-        self.ax.tick_params(axis='x', colors='#AABBDD', labelsize=10)
-        self.ax.tick_params(axis='y', colors='#AABBDD', labelsize=10)
-        
-        # Set spine colors for scientific border
-        for spine in self.ax.spines.values():
-            spine.set_edgecolor('#223344')
-            spine.set_linewidth(0.5)
-        
-        # Add technical statistics box with enhanced resolution information
-     
-        
-
-        
-        # Adjust layout
-        self.figure.tight_layout()
+        # Force draw
         self.canvas.draw()
     
     def update_heatmap_data(self, heatmap_data):
@@ -461,108 +382,32 @@ class HeatmapView(QWidget):
                 if vmax < 0.1:
                     vmax = 0.1
                 
-                # Skip normalization update if the new vmax is very close to previous
-                update_norm = True
+                # Update normalization
                 if 'norm' in self.components:
-                    old_vmax = self.components['norm'].vmax
-                    if abs(vmax - old_vmax) / old_vmax < 0.05:  # Less than 5% change
-                        update_norm = False
-                
-                if update_norm:
-                    # Adjust power normalization based on point density
-                    density_ratio = nonzero_values.size / data.size
-                    if density_ratio < 0.01:
-                        power = 0.3
-                    elif density_ratio > 0.2:
-                        power = 0.7
-                    else:
-                        power = 0.5
-                    
-                    norm = colors.PowerNorm(gamma=power, vmin=self.noise_floor, vmax=vmax)
+                    norm = colors.PowerNorm(gamma=0.5, vmin=self.noise_floor, vmax=vmax)
                     self.components['norm'] = norm
                     self.components['heatmap'].set_norm(norm)
             
-            # Always update the heatmap data which is relatively fast
+            # DIRECT APPROACH: No transposing, no fancy transformations
+            # Simply update the heatmap data directly
             self.components['heatmap'].set_data(data)
             
-            # Ensure heatmap is visible based on visualization mode
+            # Ensure heatmap is visible 
             self.components['heatmap'].set_visible(self.visualization_mode in ['heatmap', 'combined'])
             alpha = 0.95 if self.visualization_mode == 'heatmap' else 0.6
             self.components['heatmap'].set_alpha(alpha)
             
             # Clear existing contours if needed
             if 'contour' in self.components and self.components['contour'] is not None:
-                # Only remove if we're switching modes or updating contours
-                if self.visualization_mode not in ['contour', 'combined'] or self.optimizer.should_update_contours():
-                    # FIX: Handle case where contour object doesn't have collections attribute
-                    try:
-                        if hasattr(self.components['contour'], 'collections'):
-                            for coll in self.components['contour'].collections:
-                                try:
-                                    coll.remove()
-                                except Exception:
-                                    pass
-                        else:
-                            # Alternative approach: clear the axes and safely remove collections
-                            # FIXED: Don't use direct assignment to ax.collections
-                            collections_to_remove = [c for c in self.ax.collections if c != self.components['contour']]
-                            for coll in collections_to_remove:
-                                try:
-                                    coll.remove()
-                                except Exception as e:
-                                    print(f"Error removing specific collection: {e}")
-                    except Exception as e:
-                        print(f"Error clearing contours: {e}")
-                        # Fallback: safely remove collections one by one
-                        if hasattr(self.ax, 'collections') and len(self.ax.collections) > 0:
-                            while len(self.ax.collections) > 0:
-                                try:
-                                    self.ax.collections[0].remove()
-                                except Exception as e:
-                                    print(f"Error in fallback collection removal: {e}")
-                                    break
-                    
-                    self.components['contour'] = None
-            
-            # Only update contours if the visualization mode requires it and the optimizer allows it
-            if self.visualization_mode in ['contour', 'combined'] and self.optimizer.should_update_contours():
-                # Only generate contours if we have enough data
-                nonzero_count = np.count_nonzero(data)
-                if nonzero_count > 20:  # Skip if too few points
-                    try:
-                        # Use downsampled data for contour generation on large arrays
-                        contour_data = data
-                        if data.size > 40000:  # Only downsample for large arrays
-                            # Calculate stride based on array size
-                            stride = max(1, min(4, data.shape[0] // 100))
-                            contour_data = data[::stride, ::stride]
-                        
-                        # Use evenly distributed levels for better visualization
-                        if np.max(contour_data) > self.noise_floor:
-                            # Generate more contour levels for scientific precision
-                            num_levels = 12
-                            levels = np.linspace(self.noise_floor, np.max(contour_data), num_levels)
-                            
-                            # Create contours only if we have valid levels
-                            if levels.size > 1 and levels[-1] > levels[0]:
-                                # Set contour colors and properties based on mode
-                                contour_color = '#BBCCEE' if self.visualization_mode == 'combined' else '#DDEEFF'
-                                line_width = 0.4 if self.visualization_mode == 'combined' else 0.6
-                                
-                                self.components['contour'] = self.ax.contour(
-                                    contour_data,
-                                    levels=levels,
-                                    extent=[-self.max_range, self.max_range, 0, self.max_range],
-                                    colors=contour_color,
-                                    alpha=0.7,
-                                    linewidths=line_width
-                                )
-                    except Exception as e:
-                        print(f"Error creating contours: {e}")
+                try:
+                    for coll in self.components['contour'].collections:
+                        coll.remove()
+                except Exception:
+                    pass
+                self.components['contour'] = None
             
             # Only redraw if requested
             if redraw:
-                # Use draw_idle for better performance
                 self.canvas.draw_idle()
                 
         except Exception as e:
@@ -1052,42 +897,25 @@ class HeatmapView(QWidget):
     
     def reset_heatmap(self):
         """Reset the heatmap to initial state."""
-        grid_size = int(2 * self.max_range / 0.5)  # Higher resolution: 0.5m instead of 1.0m
-        # Ensure grid size is even for better memory alignment
+        # Create clean heatmap data
+        grid_size = int(2 * self.max_range)  # Simple direct mapping: 1 meter per pixel
         if grid_size % 2 == 1:
             grid_size += 1
-            
-        # Create clean heatmap data
         self.heatmap_data = np.zeros((grid_size, grid_size), dtype=np.float32)
         
-        # Safe approach to clear contours
-        try:
-            # Clear contour reference first
-            if 'contour' in self.components:
-                self.components['contour'] = None
-                
-            # Safely remove all collections without direct assignment
-            if hasattr(self, 'ax') and self.ax is not None:
-                if hasattr(self.ax, 'collections'):
-                    # Remove collections one by one until none left
-                    while len(self.ax.collections) > 0:
-                        try:
-                            # Always remove the first collection
-                            if len(self.ax.collections) > 0:
-                                self.ax.collections[0].remove()
-                        except Exception as e:
-                            print(f"Error removing collection: {e}")
-                            # If we can't remove normally, break to avoid infinite loop
-                            break
-                
-            # Force a full redraw to ensure clean slate
-            self.canvas.draw()
-        except Exception as e:
-            print(f"Error during contour cleanup: {e}")
+        # Clear any existing contours
+        if 'contour' in self.components and self.components['contour'] is not None:
+            try:
+                for coll in self.components['contour'].collections:
+                    coll.remove()
+            except Exception:
+                pass
+            self.components['contour'] = None
         
-        # Just update the heatmap data directly
+        # Update the heatmap data directly (no transpose)
         if 'heatmap' in self.components and self.components['heatmap'] is not None:
             try:
+                # Direct update, no transpose
                 self.components['heatmap'].set_data(self.heatmap_data)
                 
                 # Make sure visibility matches the current mode
@@ -1161,3 +989,218 @@ class HeatmapView(QWidget):
                 'total_cells': 1.0,
                 'coverage_percentage': 0.0
             }
+
+    def analyze_distance_bands(self, point_cloud_frames, distance_ranges=None):
+        """
+        Analyze point cloud data by distance bands with enhanced scientific metrics.
+        
+        Args:
+            point_cloud_frames: List of frame dictionaries, each containing 'points' and 'intensities'
+            distance_ranges: List of (min_dist, max_dist) tuples defining bands. 
+                            If None, will automatically generate bands up to max_range.
+            
+        Returns:
+            List of dictionaries with metrics for each distance band
+        """
+        # FIXED: Generate distance bands automatically up to max_range if not provided
+        if distance_ranges is None:
+            # Create bands in 5-meter increments up to max_range
+            band_size = 5  # 5 meter bands
+            max_dist = int(self.max_range)
+            distance_ranges = [(i, min(i + band_size, max_dist)) 
+                              for i in range(0, max_dist, band_size)]
+            
+            # Add a final band for anything potentially beyond max_range
+            if distance_ranges and distance_ranges[-1][1] < max_dist:
+                distance_ranges.append((distance_ranges[-1][1], max_dist))
+                
+        # Track per-frame metrics for temporal analysis
+        frame_metrics = {band_range: [] for band_range in [f"{min_d}-{max_d}m" for min_d, max_d in distance_ranges]}
+        
+        # Process each frame individually first for temporal consistency analysis
+        for frame_idx, frame in enumerate(point_cloud_frames):
+            points = frame['points']
+            intensities = frame['intensities']
+            
+            # Skip empty frames
+            if len(points) == 0:
+                continue
+                
+            # Calculate Euclidean distances from origin
+            distances = np.sqrt(points[:, 0]**2 + points[:, 1]**2)
+            
+            # Analyze each distance band for this frame
+            for min_dist, max_dist in distance_ranges:
+                band_range = f"{min_dist}-{max_dist}m"
+                
+                # Create mask for points in this band
+                band_mask = (distances >= min_dist) & (distances < max_dist)
+                
+                # Extract points and intensities in this band
+                band_points = points[band_mask]
+                band_intensities = intensities[band_mask] if len(band_mask) > 0 else np.array([])
+                
+                # Store per-frame metrics
+                frame_metrics[band_range].append({
+                    'count': len(band_points),
+                    'intensities': band_intensities,
+                    'points': band_points
+                })
+        
+        # Now combine and calculate aggregate metrics for each band
+        combined_results = []
+        for min_dist, max_dist in distance_ranges:
+            band_range = f"{min_dist}-{max_dist}m"
+            frames_data = frame_metrics[band_range]
+            
+            # Skip if no frames had data for this band
+            if len(frames_data) == 0:
+                combined_results.append({
+                    'range': band_range,
+                    'count': 0,
+                    'avg_intensity': 0.0,
+                    'point_density': 0.0,
+                    'intensity_variance': 0.0,
+                    'intensity_snr': 0.0,
+                    'temporal_consistency': 0.0
+                })
+                continue
+            
+            # Combine points and intensities across frames
+            all_points = np.vstack([frame['points'] for frame in frames_data if len(frame['points']) > 0]) if any(len(frame['points']) > 0 for frame in frames_data) else np.array([])
+            all_intensities = np.concatenate([frame['intensities'] for frame in frames_data if len(frame['intensities']) > 0]) if any(len(frame['intensities']) > 0 for frame in frames_data) else np.array([])
+            
+            # Calculate basic metrics
+            count = len(all_points)
+            avg_intensity = np.mean(all_intensities) if len(all_intensities) > 0 else 0.0
+            
+            # 1. Calculate point density (points per cubic meter)
+            # Volume of the spherical segment between min_dist and max_dist (in front hemisphere only)
+            # V = (2π/3) * (max_dist³ - min_dist³) / 2 (half sphere)
+            if min_dist == 0:
+                # Handle special case for first band
+                volume = (2*np.pi/3) * (max_dist**3) / 2
+            else:
+                volume = (2*np.pi/3) * (max_dist**3 - min_dist**3) / 2
+                
+            point_density = count / volume if volume > 0 else 0.0
+            
+            # 2. Calculate intensity variance and SNR
+            intensity_variance = np.var(all_intensities) if len(all_intensities) > 0 else 0.0
+            
+            # Calculate SNR as mean/std if possible
+            intensity_std = np.std(all_intensities) if len(all_intensities) > 1 else 1.0
+            intensity_snr = avg_intensity / intensity_std if intensity_std > 0 else 0.0
+            
+            # 3. Temporal consistency - how stable this band is across frames
+            frame_counts = np.array([len(frame['points']) for frame in frames_data])
+            if len(frame_counts) > 1 and np.mean(frame_counts) > 0:
+                # Coefficient of variation (lower is more consistent)
+                temporal_consistency = 1.0 - (np.std(frame_counts) / np.mean(frame_counts))
+                # Clamp to 0-1 range and invert so higher is better
+                temporal_consistency = max(0.0, min(1.0, temporal_consistency))
+            else:
+                temporal_consistency = 0.0
+                
+            # 4. Calculate distance distribution within this band for more detailed analysis
+            if len(all_points) > 0:
+                distances = np.sqrt(all_points[:, 0]**2 + all_points[:, 1]**2)
+                distance_mean = np.mean(distances)
+                distance_std = np.std(distances) if len(distances) > 1 else 0.0
+                
+                # Check if points are evenly distributed through the band
+                # Divide the band into sub-bands and check distribution
+                distance_range = max_dist - min_dist
+                num_subbands = min(5, max(2, int(distance_range)))
+                subband_size = distance_range / num_subbands
+                
+                subbands = []
+                for i in range(num_subbands):
+                    subband_min = min_dist + i * subband_size
+                    subband_max = min_dist + (i + 1) * subband_size
+                    subband_count = np.sum((distances >= subband_min) & (distances < subband_max))
+                    subbands.append({
+                        'range': f"{subband_min:.1f}-{subband_max:.1f}m",
+                        'count': int(subband_count),
+                        'percentage': float(subband_count / len(distances) if len(distances) > 0 else 0)
+                    })
+            else:
+                distance_mean = 0.0
+                distance_std = 0.0
+                subbands = []
+                
+            # Build the result object with all computed metrics
+            result = {
+                'range': band_range,
+                'count': count,
+                'avg_intensity': float(avg_intensity),
+                'point_density': float(point_density),
+                'intensity_variance': float(intensity_variance),
+                'intensity_snr': float(intensity_snr),
+                'temporal_consistency': float(temporal_consistency),
+                'distance_mean': float(distance_mean),
+                'distance_std': float(distance_std),
+                'subbands': subbands
+            }
+            
+            combined_results.append(result)
+            
+        return combined_results
+
+    def add_sampling_circle(self, index, distance, angle, radius, color='#44AAFF', enabled=True):
+        """
+        Add a sampling circle to the plot.
+        
+        Args:
+            index: Index of the circle (0-based).
+            distance: Distance from origin (meters).
+            angle: Angle in degrees from positive y-axis.
+            radius: Radius of the circle (meters).
+            color: Color of the circle.
+            enabled: Whether the circle is initially enabled.
+            
+        Returns:
+            The circle object.
+        """
+        # Calculate position
+        angle_rad = angle * (3.14159 / 180.0)
+        x_pos = distance * np.sin(angle_rad)
+        y_pos = distance * np.cos(angle_rad)
+        
+        # Create circle
+        circle = Circle(
+            (x_pos, y_pos),
+            radius,
+            fill=False,
+            color=color,
+            linestyle='-',
+            linewidth=1.8,
+            alpha=0.8 if enabled else 0.2,
+            visible=enabled
+        )
+        
+        # Add to axes
+        self.ax.add_patch(circle)
+        
+        # Store configuration
+        circle_info = {
+            'circle': circle,
+            'x_pos': x_pos,
+            'y_pos': y_pos,
+            'config': {
+                'distance': distance,
+                'angle': angle,
+                'radius': radius,
+                'color': color,
+                'enabled': enabled
+            }
+        }
+        
+        # Store component
+        self.components['sampling_circles'].append(circle_info)
+        self.components[f'sampling_circle_{index}'] = circle
+        
+        # Redraw
+        self.canvas.draw_idle()
+        
+        return circle

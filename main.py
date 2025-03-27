@@ -107,7 +107,7 @@ def load_config(config_path):
         },
         'visualization': {
             'colormap': 'plasma',
-            'decay_factor': 0.98,
+            'decay_factor': 0.95,
             'mode': 'heatmap',
             'noise_floor': 0.05,
             'smoothing_sigma': 2.0,

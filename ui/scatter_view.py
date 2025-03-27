@@ -330,7 +330,8 @@ class ScatterView(QWidget):
         self.colorbar.ax.yaxis.label.set_color('#99CCFF')
         self.colorbar.ax.tick_params(colors='#99CCFF')
         
-     
+        # Comment out statistics text boxes to remove them from the plot
+        '''
         # Add statistics text boxes with scientific notation
         self.components['stats_text'] = self.ax.text(
             0.02, 0.98, '',
@@ -359,6 +360,10 @@ class ScatterView(QWidget):
                 edgecolor='#334488'
             )
         )
+        '''
+        # Remove statistics text boxes completely by adding empty placeholders instead
+        self.components['stats_text'] = None
+        self.components['circle_stats_text'] = None
         
         # Enable grid for scientific precision - very subtle
         self.ax.grid(True, linestyle=':', linewidth=0.2, alpha=0.3, color='#223366')
@@ -474,51 +479,29 @@ class ScatterView(QWidget):
         Update the scatter plot with new data.
         
         Args:
-            x: X-coordinates array
-            y: Y-coordinates array
-            intensities: Signal intensity array
-            circles_data: List of dictionaries with circle data
+            x: Array of x-coordinates.
+            y: Array of y-coordinates.
+            intensities: Array of intensity values.
+            circles_data: List of dictionaries with circle data.
         """
-        # Store the latest data for potential saving
-        self.latest_x = x
-        self.latest_y = y
-        self.latest_intensities = intensities
-        self.latest_points = len(x)
-        
-        # Verify that we have valid data
-        if x is None or y is None or len(x) == 0 or len(y) == 0:
-            # If no data, don't update anything
-            return
-        
         try:
-            # Skip update if optimizer decides it's not necessary
-            if not self.optimizer.should_update(len(x)):
-                return
-                
-            # Apply intelligent downsampling for large datasets
-            if len(x) > self.optimizer.max_points:
-                x, y, intensities = self.optimizer.downsample(x, y, intensities)
-                
-            # Update main scatter plot with new data
+            # Store the latest data for potential saving
+            self.latest_x = x
+            self.latest_y = y
+            self.latest_intensities = intensities
+            self.latest_points = len(x)
+            
             if len(x) > 0:
-                # Normalize intensity values to 0-1 range
-                if len(intensities) > 0:
-                    min_intensity = np.min(intensities)
-                    max_intensity = np.max(intensities)
-                    
-                    # Prevent division by zero if all intensities are the same
-                    if max_intensity > min_intensity:
-                        normalized_intensities = (intensities - min_intensity) / (max_intensity - min_intensity)
-                    else:
-                        normalized_intensities = np.zeros_like(intensities)
-                else:
-                    normalized_intensities = np.array([])
+                # Let optimizer decide whether to downsample
+                x, y, intensities = self.optimizer.optimize_points(x, y, intensities)
                 
-                # Set offsets and colors in one operation
+                # Update scatter offsets more efficiently
                 self.components['scatter'].set_offsets(np.column_stack((x, y)))
-                self.components['scatter'].set_array(normalized_intensities)
                 
-                # Update scatter plot visibility
+                # Set colors, combining normalization and colormap in one step
+                self.components['scatter'].set_array(intensities)
+                
+                # Make sure scatter is visible
                 self.components['scatter'].set_visible(True)
                 
                 # Update each circle's scatter plot
@@ -547,7 +530,7 @@ class ScatterView(QWidget):
                             scatter.set_offsets(np.empty((0, 2)))
                             scatter.set_visible(False)
                 
-                # Update statistics text with enhanced scientific notation
+                # Calculate statistics text but don't display it since we removed the text components
                 distances = np.sqrt(np.square(x) + np.square(y))
                 bins = np.arange(0, self.max_range + self.circle_interval, self.circle_interval)
                 counts, _ = np.histogram(distances, bins=bins)
@@ -589,7 +572,10 @@ class ScatterView(QWidget):
                 else:
                     stats = f"n = {len(x)}\nInsufficient data for statistics"
                     
-                self.components['stats_text'].set_text(stats)
+                # Only update text component if it exists
+                if 'stats_text' in self.components and self.components['stats_text'] is not None:
+                    if hasattr(self.components['stats_text'], 'set_text'):
+                        self.components['stats_text'].set_text(stats)
             else:
                 # Clear plots if no data - use empty arrays (more efficient)
                 self.components['scatter'].set_offsets(np.empty((0, 2)))
@@ -599,7 +585,10 @@ class ScatterView(QWidget):
                     scatter.set_offsets(np.empty((0, 2)))
                     scatter.set_visible(False)
                 
-                self.components['stats_text'].set_text("No data")
+                # Only update text component if it exists
+                if 'stats_text' in self.components and self.components['stats_text'] is not None:
+                    if hasattr(self.components['stats_text'], 'set_text'):
+                        self.components['stats_text'].set_text("No data")
             
             # Use draw_idle for more efficient rendering
             # Ensure aspect ratio is maintained
@@ -616,6 +605,13 @@ class ScatterView(QWidget):
         Args:
             circle_stats: List of dictionaries with statistics for each circle
         """
+        # Only process if the text component exists
+        if 'circle_stats_text' not in self.components or self.components['circle_stats_text'] is None:
+            return
+            
+        if not hasattr(self.components['circle_stats_text'], 'set_text'):
+            return
+            
         stats_text = ""
         
         for i, stats in enumerate(circle_stats):
@@ -650,28 +646,29 @@ class ScatterView(QWidget):
         self.components['circle_stats_text'].set_text(stats_text)
         self.canvas.draw_idle()
     
-    def clear_points(self):
-        """Clear all point data from the plot while preserving other elements."""
-        if 'scatter' in self.components:
+    def clear_data(self):
+        """Clear all data from the plot."""
+        try:
             self.components['scatter'].set_offsets(np.empty((0, 2)))
-            self.components['scatter'].set_array(np.array([]))
+            self.components['scatter'].set_visible(False)
+            
             for scatter in self.components['circle_scatters']:
                 scatter.set_offsets(np.empty((0, 2)))
-            self.components['stats_text'].set_text("")
-            self.components['circle_stats_text'].set_text("")
+                scatter.set_visible(False)
+                
+            # Only update text components if they exist
+            if 'stats_text' in self.components and self.components['stats_text'] is not None:
+                if hasattr(self.components['stats_text'], 'set_text'):
+                    self.components['stats_text'].set_text("")
+                    
+            if 'circle_stats_text' in self.components and self.components['circle_stats_text'] is not None:
+                if hasattr(self.components['circle_stats_text'], 'set_text'):
+                    self.components['circle_stats_text'].set_text("")
+                    
             # Redraw the canvas
             self.canvas.draw_idle()
-        
-        # Reset latest data
-        self.latest_x = np.array([])
-        self.latest_y = np.array([])
-        self.latest_intensities = np.array([])
-        self.latest_points = 0
-
-    # Keep the original method for backwards compatibility
-    def clear_plot(self):
-        """Clear all data from the plot. Legacy method - use clear_points instead."""
-        self.clear_points()
+        except Exception as e:
+            print(f"Error clearing scatter data: {e}")
 
     def configure_optimizer(self, update_interval=None, max_points=None, adaptive_sampling=None):
         """

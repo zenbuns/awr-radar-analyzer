@@ -142,55 +142,59 @@ def generate_comparison_report(analyzer) -> str:
 
                             <h5>Distance Band Analysis (All {results.get('frames_analyzed', 'Available')} Frames)</h5>
                             <p><em>Distance calculation method: {distance_method}</em></p>
-                            <table>
-                                <tr>
-                                    <th>Distance Band</th>
-                                    <th>Points</th>
-                                    <th>Percentage</th>
-                                    <th>Avg. Intensity</th>
-                                </tr>
+                            <h3>Distance Band Analysis</h3>
+                            <div class="table-responsive">
+                                <table class="band-table">
+                                    <tr>
+                                        <th>Distance Band</th>
+                                        <th>Points</th>
+                                        <th>Avg. Intensity</th>
+                                        <th>Point Density (pts/m³)</th>
+                                        <th>Intensity SNR</th>
+                                        <th>Temporal Consistency</th>
+                                    </tr>
                     """)
 
-                    distance_bands = results.get('distance_bands', {})
-                    target_band = results.get('target_band', '')
-                    target_band_count = results.get('target_band_points', 0)
-                    total_count = results.get('total_points', 0)
-                    
-                    # Check for metadata with more accurate distance band information
-                    if 'metadata' in results:
-                        metadata = results.get('metadata', {})
-                        if 'distance_bands' in metadata:
-                            # Use the more detailed metadata information
-                            distance_bands = metadata.get('distance_bands', {})
-                            target_band = metadata.get('target_band', target_band)
-                            target_band_count = metadata.get('target_band_count', target_band_count)
-                            total_count = metadata.get('total_count', total_count)
-                    
-                    for band, band_data in distance_bands.items():
-                        highlight = ''
-                        count = 0
-                        avg_intensity = 0
-                        
-                        # Handle both dictionary and scalar values
-                        if isinstance(band_data, dict):
-                            count = band_data.get('count', 0)
-                            avg_intensity = band_data.get('avg_intensity', 0)
-                        else:
-                            count = band_data  # If band_data is just the count
+                    # Process distance bands if available
+                    if 'distance_bands' in results:
+                        distance_bands = results['distance_bands']
+                        target_band = results.get('target_band', None)
+                        total_count = results.get('total_points', 1)  # Avoid division by zero
+                                                
+                        for band, band_data in distance_bands.items():
+                            # Handle both dictionary and scalar formats
+                            if isinstance(band_data, dict):
+                                count = band_data.get('count', 0)
+                                avg_intensity = band_data.get('avg_intensity', 0.0)
+                                # Get new metrics if available, with defaults if not
+                                point_density = band_data.get('point_density', 0.0)
+                                intensity_snr = band_data.get('intensity_snr', 0.0)
+                                temporal_consistency = band_data.get('temporal_consistency', 0.0)
+                            else:
+                                # Handle case where band_data is just a count (old format)
+                                count = float(band_data)
+                                avg_intensity = 0.0
+                                point_density = 0.0
+                                intensity_snr = 0.0
+                                temporal_consistency = 0.0
                             
-                        percentage = (count / total_count * 100) if total_count > 0 else 0
-                        
-                        if band == target_band:
-                            highlight = 'style="background-color: #ffffcc; font-weight: bold;"'
+                            highlight = ''
+                            if band == target_band:
+                                highlight = 'style="background-color: #ffffcc; font-weight: bold;"'
                             
-                        f.write(f"""
-                            <tr {highlight}>
-                                <td>{band}</td>
-                                <td>{count:.0f}</td>
-                                <td>{percentage:.1f}%</td>
-                                <td>{avg_intensity:.2f}</td>
-                            </tr>
-                        """)
+                            # Format the temporal consistency as a percentage for readability
+                            temporal_consistency_pct = temporal_consistency * 100
+                            
+                            f.write(f"""
+                                <tr {highlight}>
+                                    <td>{band}</td>
+                                    <td>{count:.0f}</td>
+                                    <td>{avg_intensity:.2f}</td>
+                                    <td>{point_density:.6f}</td>
+                                    <td>{intensity_snr:.2f}</td>
+                                    <td>{temporal_consistency_pct:.1f}%</td>
+                                </tr>
+                            """)
 
                     f.write("</table></div>")
             

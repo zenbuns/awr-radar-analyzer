@@ -25,10 +25,26 @@ def calculate_heatmap_size(params) -> Tuple[int, int]:
     Returns:
         A tuple containing the width and height of the heatmap grid in pixels.
     """
-    grid_size = int(2 * params.max_range / params.heatmap_resolution)
-    # Ensure grid size is even for better memory alignment
+    # FIXED: Ensure grid size is large enough for the max_range with the given resolution
+    max_range = params.max_range
+    resolution = params.heatmap_resolution
+    
+    # Calculate the required grid size - multiply by 2 to cover negative to positive x-axis
+    # and 0 to max_range on y-axis
+    grid_size = int(2 * max_range / resolution)
+    
+    # Add a small buffer to ensure we don't lose points at the edges due to rounding
+    grid_size += 2
+    
+    # Ensure grid size is even for better memory alignment and to avoid indexing issues
     if grid_size % 2 == 1:
         grid_size += 1
+        
+    # Log the calculated size for debugging
+    if hasattr(params, 'get_logger'):
+        params.get_logger().debug(f"Calculated heatmap grid size: {grid_size}x{grid_size} "
+                                 f"for max_range={max_range}m and resolution={resolution}m")
+    
     return grid_size, grid_size
 
 
@@ -250,17 +266,57 @@ def _prepare_grid_indices(
         res = analyzer.params.heatmap_resolution
         grid_size_x, grid_size_y = calculate_heatmap_size(analyzer.params)
 
-        # Optimize coordinate conversion with vectorized operations
-        # Use direct array operations instead of np.floor for speed
-        grid_x = ((x + max_range) / res).astype(np.int32)
-        grid_y = (y / res).astype(np.int32)
+        # Debug occasionally for validation
+        if not hasattr(analyzer, 'grid_debug_counter'):
+            analyzer.grid_debug_counter = 0
+        
+        analyzer.grid_debug_counter += 1
+        should_debug = analyzer.grid_debug_counter % 500 == 0
 
-        # Use single boolean mask for filtering
+        # CRITICAL FIX: Convert radar coordinates to grid indices EXACTLY as the scatter plot
+        # Looking at the scatter plot image, we need to ensure that:
+        # - Negative x (azimuth) values appear on left side
+        # - Positive x (azimuth) values appear on right side
+        # - Y (range) values increase from bottom to top
+        #
+        # The scatter plot uses a direct mapping where each point at coordinates (x,y)
+        # is plotted at that exact position, so we need to do the same for our grid
+
+        # Map from physical coordinates to grid indices
+        # For a grid of size (grid_size_y, grid_size_x):
+        # 1. X-axis: -max_range to +max_range maps to 0 to grid_size_x-1
+        # 2. Y-axis: 0 to max_range maps to 0 to grid_size_y-1
+        grid_x = np.floor(((x + max_range) / (2 * max_range) * grid_size_x)).astype(np.int32)
+        grid_y = np.floor((y / max_range * grid_size_y)).astype(np.int32)
+
+        # Check if coordinates are in valid range
         valid_mask = (0 <= grid_x) & (grid_x < grid_size_x) & (0 <= grid_y) & (grid_y < grid_size_y)
+        
+        # Log filtering statistics for debugging
+        if should_debug:
+            total_points = len(x)
+            valid_points = np.sum(valid_mask)
+            filtered_ratio = (total_points - valid_points) / total_points * 100 if total_points > 0 else 0
+            analyzer.get_logger().debug(f"Grid mapping: x range [{np.min(x):.2f}, {np.max(x):.2f}] → grid_x [{np.min(grid_x) if len(grid_x) > 0 else -1}, {np.max(grid_x) if len(grid_x) > 0 else -1}]")
+            analyzer.get_logger().debug(f"Grid mapping: y range [{np.min(y):.2f}, {np.max(y):.2f}] → grid_y [{np.min(grid_y) if len(grid_y) > 0 else -1}, {np.max(grid_y) if len(grid_y) > 0 else -1}]")
+            analyzer.get_logger().debug(f"Grid size: ({grid_size_x}, {grid_size_y})")
+            analyzer.get_logger().debug(f"Grid filtering: {valid_points}/{total_points} points kept, {filtered_ratio:.1f}% filtered")
+            
+            # Log details about filtered points if significant filtering occurs
+            if filtered_ratio > 10 and total_points > 10:
+                invalid_x = x[~valid_mask]
+                invalid_y = y[~valid_mask]
+                if len(invalid_x) > 0:
+                    analyzer.get_logger().warning(
+                        f"Points being filtered: "
+                        f"x=[{np.min(invalid_x):.1f}, {np.max(invalid_x):.1f}], "
+                        f"y=[{np.min(invalid_y):.1f}, {np.max(invalid_y):.1f}]"
+                    )
+        
         if not np.any(valid_mask):
             return None, None, None, 0, 0
 
-        # Apply mask only once per array
+        # Apply mask to get valid indices and intensities
         grid_x = grid_x[valid_mask]
         grid_y = grid_y[valid_mask]
         intensity_valid = intensity[valid_mask]
@@ -331,40 +387,129 @@ def update_live_heatmap_vectorized(
         return
 
     try:
+        # Log distribution of points for debugging purposes
+        if hasattr(analyzer, 'debug_counter') and analyzer.debug_counter % 500 == 0:
+            # Calculate distance from origin (radar position)
+            distances = np.sqrt(x**2 + y**2)
+            
+            # Count points in different range bands
+            bands = [
+                (0, 5), (5, 10), (10, 15), (15, 20), 
+                (20, 25), (25, 30), (30, 35), (35, float('inf'))
+            ]
+            
+            # Output detailed distance distribution for debugging
+            band_counts = []
+            for min_d, max_d in bands:
+                count = np.sum((distances >= min_d) & (distances < max_d))
+                band_counts.append(f"{min_d}-{max_d}m: {count}")
+            
+            analyzer.get_logger().debug(f"Point distance distribution: {', '.join(band_counts)}")
+            
+            # Also log azimuth distribution (horizontal axis)
+            azimuth_bands = [
+                (-35, -30), (-30, -20), (-20, -10), (-10, 0),
+                (0, 10), (10, 20), (20, 30), (30, 35)
+            ]
+            azimuth_counts = []
+            for min_a, max_a in azimuth_bands:
+                count = np.sum((x >= min_a) & (x < max_a))
+                azimuth_counts.append(f"{min_a}-{max_a}m: {count}")
+            
+            analyzer.get_logger().debug(f"Azimuth distribution: {', '.join(azimuth_counts)}")
+        
         # Use shared grid preparation logic
         grid_x, grid_y, intensity_valid, grid_size_x, grid_size_y = _prepare_grid_indices(analyzer, x, y, intensity)
         if grid_x is None:
             return
 
-        # CRITICAL FIX: Ensure heatmap array is initialized
+        # Ensure heatmap array is initialized with proper dimensions
         if analyzer.live_heatmap_data is None or analyzer.live_heatmap_data.shape != (grid_size_y, grid_size_x):
             analyzer.live_heatmap_data = np.zeros((grid_size_y, grid_size_x), dtype=np.float32)
             analyzer.get_logger().info(f"Re-initialized live heatmap with shape {grid_size_y}x{grid_size_x}")
             
-        # CRITICAL FIX: Ensure intensity values are normalized - only for live heatmap
-        if np.max(intensity_valid) > 100:
-            # Intensity seems to be in raw format, normalize to 0-1 range
-            intensity_valid = intensity_valid / np.max(intensity_valid)
+        # CRITICAL FIX: Apply intensity scaling to exactly match scatter plot brightness
+        if len(intensity_valid) > 0:
+            # Calculate distances from origin for each valid point
+            # We need to convert grid indices back to original coordinates
+            original_x = (grid_x / grid_size_x * 2 * analyzer.params.max_range) - analyzer.params.max_range
+            original_y = grid_y / grid_size_y * analyzer.params.max_range
+            distances = np.sqrt(original_x**2 + original_y**2)
             
-        elif np.max(intensity_valid) < 0.001 and len(intensity_valid) > 0:
-            # Intensity is too small, scale it up to be visible
-            intensity_valid = np.ones_like(intensity_valid) * 0.5
-        
-        # Use np.add.at for efficient accumulation
-        np.add.at(analyzer.live_heatmap_data, (grid_y, grid_x), intensity_valid)
-        
-        # DEBUGGING: Log occasional stats about the heatmap data (reduced frequency)
+            # Create distance-based scaling that matches the scatter plot's brightness
+            # Looking at the scatter plot, points appear to have uniform brightness
+            # regardless of distance, so we need to compensate for natural signal decay
+            # The scaling should be proportional to distance from origin
+            
+            # Simple distance-based scaling: further = higher intensity multiplier
+            # Scale from 1.0 (at origin) up to 3.0 (at max_range)
+            distance_ratio = distances / analyzer.params.max_range  # 0.0 to 1.0
+            scaling_factors = 1.0 + 2.0 * distance_ratio
+
+            # Apply scaling to each point's intensity
+            boosted_intensity = intensity_valid * scaling_factors
+            
+            # Normalize if needed
+            max_intensity = np.max(boosted_intensity) if len(boosted_intensity) > 0 else 0
+            
+            if max_intensity > 100:
+                # Scale down if values are too large
+                boosted_intensity = boosted_intensity / max_intensity
+            elif max_intensity < 0.001 and len(boosted_intensity) > 0:
+                # Use default values if too small
+                boosted_intensity = np.ones_like(boosted_intensity) * 0.5
+            
+            # Add to heatmap grid
+            np.add.at(analyzer.live_heatmap_data, (grid_y, grid_x), boosted_intensity)
+            
+            # Log intensity scaling statistics occasionally
+            if hasattr(analyzer, 'grid_debug_counter') and analyzer.grid_debug_counter % 500 == 0:
+                min_scale = np.min(scaling_factors) if len(scaling_factors) > 0 else 0
+                max_scale = np.max(scaling_factors) if len(scaling_factors) > 0 else 0
+                
+                analyzer.get_logger().debug(
+                    f"Distance-based scaling: min={min_scale:.2f}x, max={max_scale:.2f}x, "
+                    f"points={len(boosted_intensity)}"
+                )
+        else:
+            # No valid points to add
+            pass
+            
+        # Log heatmap statistics occasionally to verify data is being added correctly
         if not hasattr(analyzer, 'debug_counter'):
             analyzer.debug_counter = 0
             
         analyzer.debug_counter += 1
-        if analyzer.debug_counter % 500 == 0:  # Reduced frequency from 100 to 500
+        if analyzer.debug_counter % 500 == 0:
+            # Check basic statistics
             min_val = np.min(analyzer.live_heatmap_data)
             max_val = np.max(analyzer.live_heatmap_data)
             nonzero = np.count_nonzero(analyzer.live_heatmap_data)
-            analyzer.get_logger().debug(f"Live heatmap stats: min={min_val:.6f}, max={max_val:.6f}, nonzero={nonzero}")
+            
+            # Find the max distance where data exists
+            if nonzero > 0:
+                nonzero_rows = np.any(analyzer.live_heatmap_data > 0, axis=1)
+                max_nonzero_row = np.max(np.where(nonzero_rows)[0]) if np.any(nonzero_rows) else 0
+                max_distance = max_nonzero_row / grid_size_y * analyzer.params.max_range
+                
+                # Check for azimuth (x-axis) coverage
+                nonzero_cols = np.any(analyzer.live_heatmap_data > 0, axis=0)
+                min_col = np.min(np.where(nonzero_cols)[0]) if np.any(nonzero_cols) else 0
+                max_col = np.max(np.where(nonzero_cols)[0]) if np.any(nonzero_cols) else 0
+                
+                # Convert to physical coordinates
+                min_azimuth = (min_col / grid_size_x * 2 * analyzer.params.max_range) - analyzer.params.max_range
+                max_azimuth = (max_col / grid_size_x * 2 * analyzer.params.max_range) - analyzer.params.max_range
+                
+                analyzer.get_logger().debug(
+                    f"Heatmap stats: nonzero={nonzero}, min={min_val:.3f}, max={max_val:.3f}, "
+                    f"range=[0, {max_distance:.1f}m], azimuth=[{min_azimuth:.1f}, {max_azimuth:.1f}m]"
+                )
     except Exception as e:
         analyzer.get_logger().error(f"Error updating live heatmap: {str(e)}")
+        # Log the full traceback for debugging
+        import traceback
+        analyzer.get_logger().error(f"Detailed error: {traceback.format_exc()}")
 
 
 def apply_live_heatmap_decay(analyzer) -> None:
@@ -379,9 +524,60 @@ def apply_live_heatmap_decay(analyzer) -> None:
         analyzer: RadarPointCloudAnalyzer instance.
     """
     try:
-        analyzer.live_heatmap_data *= analyzer.live_heatmap_decay_factor
+        # FIXED: Prevent decay from eliminating distant points too quickly
+        # Apply a position-dependent decay where distant points decay slower
+        if analyzer.live_heatmap_data is not None and analyzer.live_heatmap_data.size > 0:
+            # Standard decay for all points
+            base_decay = analyzer.live_heatmap_decay_factor
+            
+            # Use more granular decay based on distance from sensor (y-axis in grid)
+            # Apply less decay to points that are further away
+            grid_size_y, grid_size_x = analyzer.live_heatmap_data.shape
+            
+            # Create a decay mask where rows further from the sensor (higher y-index) 
+            # have reduced decay (values closer to 1.0)
+            max_range = analyzer.params.max_range
+            heatmap_resolution = analyzer.params.heatmap_resolution
+            
+            # Create distance-based decay factors
+            # OPTIMIZATION: Avoid creating this mask on every call
+            if not hasattr(analyzer, '_decay_mask') or analyzer._decay_mask.shape != analyzer.live_heatmap_data.shape:
+                # Create y-coordinate array (rows)
+                y_coords = np.arange(grid_size_y) * heatmap_resolution
+                
+                # Calculate distance-dependent decay adjustment (higher for distant points)
+                # Linear scaling: 0 at origin, up to 0.1 at max range (reducing decay)
+                decay_adjustment = y_coords / max_range * 0.1
+                
+                # Create 2D mask by broadcasting
+                analyzer._decay_mask = base_decay + np.tile(
+                    decay_adjustment[:, np.newaxis], (1, grid_size_x)
+                )
+                
+                # Ensure decay values are within valid range
+                analyzer._decay_mask = np.clip(analyzer._decay_mask, 0.8, 0.999)
+                
+                # Log the created decay mask range
+                analyzer.get_logger().info(
+                    f"Created distance-dependent decay mask: min={np.min(analyzer._decay_mask):.4f}, "
+                    f"max={np.max(analyzer._decay_mask):.4f}"
+                )
+            
+            # Apply the position-dependent decay
+            analyzer.live_heatmap_data *= analyzer._decay_mask
+            
+            # OPTIMIZATION: Periodically clean up very small values to prevent numerical issues
+            if hasattr(analyzer, 'debug_counter') and analyzer.debug_counter % 100 == 0:
+                # Only remove extremely small values that contribute nothing to visualization
+                analyzer.live_heatmap_data[analyzer.live_heatmap_data < 1e-6] = 0
+        else:
+            # Fallback to simple decay if heatmap not initialized
+            analyzer.live_heatmap_data *= analyzer.live_heatmap_decay_factor
     except Exception as e:
         analyzer.get_logger().error(f"Error applying heatmap decay: {str(e)}")
+        # Log stack trace for better debugging
+        import traceback
+        analyzer.get_logger().error(f"Decay error details: {traceback.format_exc()}")
 
 
 def compute_heatmap_metrics(analyzer) -> Dict[str, float]:

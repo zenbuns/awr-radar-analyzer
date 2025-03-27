@@ -195,8 +195,24 @@ class RadarPointCloudAnalyzer(Node):
             'roi_indicators': []
         }
 
-        # Heatmap data
+        # FIXED: Ensure proper grid size calculation for heatmap data 
+        # that handles the full max_range of 35.0 meters
         grid_size = calculate_heatmap_size(self.params)
+        self.get_logger().info(f"Initializing heatmap with grid size {grid_size} for max_range={self.params.max_range}m")
+        
+        # FIXED: Verify the grid size is adequate for the max range
+        resolution = self.params.heatmap_resolution
+        expected_size = int(2 * self.params.max_range / resolution)
+        if expected_size > grid_size[0]:
+            self.get_logger().warning(
+                f"Grid size {grid_size} may be too small for max_range={self.params.max_range}m "
+                f"with resolution={resolution}m. Expected minimum: {expected_size}"
+            )
+            # Force correction to ensure proper size
+            grid_size = (expected_size, expected_size)
+            if expected_size % 2 == 1:
+                grid_size = (expected_size + 1, expected_size + 1)  # Ensure even size
+                
         self.heatmap_data = np.zeros(grid_size, dtype=np.float32)
         self.live_heatmap_data = np.zeros(grid_size, dtype=np.float32)
         self.live_heatmap_decay_factor = 0.98
