@@ -106,8 +106,10 @@ QPushButton {
     background-color: #313244;
     border: 1px solid #45475a;
     border-radius: 4px;
-    padding: 6px 12px;
-    min-width: 80px;
+    padding: 8px 16px;
+    min-width: 100px;
+    min-height: 32px;
+    text-align: center;
 }
 
 QPushButton:hover {
@@ -117,6 +119,7 @@ QPushButton:hover {
 
 QPushButton:pressed {
     background-color: #181825;
+    border: 1px solid #89b4fa;
 }
 
 QPushButton:disabled {
@@ -130,6 +133,7 @@ QPushButton#primary {
     background-color: #89b4fa;
     color: #1e1e2e;
     font-weight: bold;
+    border: none;
 }
 
 QPushButton#primary:hover {
@@ -140,15 +144,32 @@ QPushButton#primary:pressed {
     background-color: #89dceb;
 }
 
+QPushButton#primary:disabled {
+    background-color: #45475a;
+    color: #6c7086;
+    border: none;
+}
+
 /* Danger/warning buttons */
 QPushButton#danger {
     background-color: #f38ba8;
     color: #1e1e2e;
     font-weight: bold;
+    border: none;
 }
 
 QPushButton#danger:hover {
     background-color: #f5c2e7;
+}
+
+QPushButton#danger:pressed {
+    background-color: #eba0ac;
+}
+
+QPushButton#danger:disabled {
+    background-color: #45475a;
+    color: #6c7086;
+    border: none;
 }
 
 /* Checkboxes & Radio buttons */

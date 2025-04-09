@@ -8,6 +8,7 @@ of radar point cloud data, including scatter plots and heatmaps.
 """
 
 import os
+import time
 from datetime import datetime
 import numpy as np
 import matplotlib.pyplot as plt
@@ -15,6 +16,7 @@ import matplotlib.colors as colors
 import matplotlib.patches as patches
 from matplotlib.artist import Artist
 from typing import Tuple, List, Dict, Any, Sequence
+from scipy.ndimage import gaussian_filter, gaussian_gradient_magnitude
 
 
 def setup_visualization(analyzer) -> plt.Figure:
@@ -39,17 +41,63 @@ def setup_visualization(analyzer) -> plt.Figure:
         analyzer.viz_components['fig'] = fig
         analyzer.viz_components['ax'] = ax
 
-        # Set background colors
-        ax.set_facecolor('#000040')
-        fig.patch.set_facecolor('#000040')
+        # Create radial gradient background for better depth perception
+        import matplotlib.colors as mcolors
+        from matplotlib.patches import Rectangle
+        
+        # Define radial gradient colors (dark at center, slightly lighter at edges)
+        bg_color_center = '#020924'  # Deeper navy blue for better contrast (from scatter_view)
+        bg_color_edge = '#051530'    # Slightly lighter blue at edges
+        
+        # Get plot dimensions
+        x_limit, y_limit = max(1.0, analyzer.params.max_range), max(1.0, 2 * analyzer.params.max_range)
+        
+        # Create radial gradient as an image
+        gradient_resolution = 100
+        x = np.linspace(-x_limit, x_limit, gradient_resolution)
+        y = np.linspace(0, y_limit, gradient_resolution)
+        X, Y = np.meshgrid(x, y)
+        
+        # Create distance from center normalized to [0, 1]
+        distances = np.sqrt(X**2 + Y**2)
+        max_distance = np.sqrt(x_limit**2 + y_limit**2)
+        normalized_distances = distances / max_distance
+        
+        # Create gradient array that maps distance to color
+        # Convert colors to RGB
+        c1 = mcolors.to_rgb(bg_color_center)
+        c2 = mcolors.to_rgb(bg_color_edge)
+        
+        # Create gradient by interpolating between colors
+        gradient = np.zeros((gradient_resolution, gradient_resolution, 3))
+        for i in range(3):  # RGB channels
+            gradient[:,:,i] = c1[i] + normalized_distances * (c2[i] - c1[i])
+        
+        # Display gradient as background
+        ax.imshow(gradient, extent=[-x_limit, x_limit, 0, y_limit], 
+                 origin='lower', aspect='auto', zorder=-100)  # zorder ensures it's behind everything
+        
+        # Still set face color as fallback
+        ax.set_facecolor(bg_color_center)
+        fig.patch.set_facecolor(bg_color_center)
 
         # Set plot limits
-        x_limit, y_limit = max(1.0, analyzer.params.max_range), max(1.0, 2 * analyzer.params.max_range)
         ax.set_xlim(-x_limit, x_limit)
         ax.set_ylim(0, y_limit)
 
-        # Add range arcs
-        for r in range(0, int(y_limit) + 1, int(analyzer.params.circle_interval)):
+        # Define the interval for reference circles with scientific precision
+        circle_interval_m = int(analyzer.params.circle_interval)
+        major_ranges = list(range(0, int(y_limit) + 1, circle_interval_m * 2))
+        minor_ranges = [
+            r for r in range(0, int(y_limit) + 1, circle_interval_m)
+            if r not in major_ranges
+        ]
+        
+        # Add major range arcs with scientific styling
+        for r in major_ranges:
+            if r == 0:  # Skip the zero radius
+                continue
+                
             arc = patches.Arc(
                 (0, 0),
                 width=2 * r,
@@ -58,64 +106,137 @@ def setup_visualization(analyzer) -> plt.Figure:
                 theta1=0,
                 theta2=180,
                 fill=False,
-                color='white',
-                linestyle=':',
-                linewidth=0.8,
-                alpha=0.7
+                color='#99CCFF',  # Brighter blue for contrast against dark background
+                linestyle='-',
+                linewidth=0.6,
+                alpha=0.6
             )
             ax.add_patch(arc)
-            if 0 < r <= analyzer.params.max_range and r % (int(analyzer.params.circle_interval) * 2) == 0:
-                ax.text(0, r, f"{int(r)}m", ha='right', va='bottom', color='white', fontsize=8)
+            
+            # Only label major circles
+            if 0 < r <= analyzer.params.max_range:
+                ax.text(
+                    r * 0.05, r, f"{int(r)}m", ha='left', va='bottom', 
+                    color='#99CCFF', fontsize=10,
+                    weight='normal',
+                    bbox=dict(facecolor=bg_color_center, edgecolor='none', 
+                             alpha=0.7, pad=1, boxstyle='round,pad=0.1')
+                )
+        
+        # Add minor range arcs with subtle scientific styling
+        for r in minor_ranges:
+            if r == 0:  # Skip the zero radius
+                continue
+                
+            arc = patches.Arc(
+                (0, 0),
+                width=2 * r,
+                height=2 * r,
+                angle=0,
+                theta1=0,
+                theta2=180,
+                fill=False,
+                color='#7799CC',  # Lighter scientific blue
+                linestyle=':',
+                linewidth=0.3,
+                alpha=0.4
+            )
+            ax.add_patch(arc)
+            
+        # Add angle markers every 30 degrees with scientific styling
+        for angle in range(-90, 91, 30):
+            if angle == 0:
+                continue
+                
+            # Convert degrees to radians for calculations
+            angle_rad = np.radians(angle)
+            
+            # Calculate end points using parametric form
+            x_end = x_limit * np.sin(angle_rad)
+            y_end = y_limit * 0.5 * np.cos(angle_rad)
+            
+            # Draw angle line
+            ax.plot(
+                [0, x_end], 
+                [0, y_end], 
+                linestyle='--', 
+                color='#7788BB', 
+                linewidth=0.5, 
+                alpha=0.6
+            )
+            
+            # Add angle label with scientific notation at 80% of max range
+            label_distance = 0.4 * y_limit
+            x_label = label_distance * np.sin(angle_rad)
+            y_label = label_distance * np.cos(angle_rad)
+            
+            ax.text(
+                x_label, y_label, f"{angle}°", 
+                color='#99BBDD',
+                fontsize=9,
+                ha='center', 
+                va='center',
+                bbox=dict(facecolor=bg_color_center, edgecolor='none', 
+                         alpha=0.7, boxstyle='round,pad=0.1')
+            )
 
-        # Create scatter plots
-        analyzer.viz_components['scatter'] = ax.scatter([], [], s=8, c=[], cmap='viridis')
-        analyzer.viz_components['circle_scatter'] = ax.scatter([], [], s=10, c='lime', marker='x')
+        # Create scatter plots with enhanced aesthetics
+        analyzer.viz_components['scatter'] = ax.scatter(
+            [], [], s=12, c=[], cmap='plasma', alpha=1.0, vmin=-64, vmax=64
+        )
+        analyzer.viz_components['circle_scatter'] = ax.scatter(
+            [], [], s=14, c='#44DDFF', marker='x'
+        )
 
-        # Create sampling circle
+        # Create sampling circle with scientific styling
         analyzer.viz_components['sampling_circle'] = plt.Circle(
             (0, analyzer.params.circle_distance),
             analyzer.params.circle_radius,
             fill=False,
-            color='lime',
+            color='#44DDFF',
             linestyle='-',
             linewidth=1.5
         )
         ax.add_patch(analyzer.viz_components['sampling_circle'])
 
-        # Set labels and title
-        ax.set_xlabel('X (m)', fontsize=10, labelpad=8, color='white')
-        ax.set_ylabel('Y (m)', fontsize=10, labelpad=8, color='white')
-        ax.set_title('Radar Point Cloud', fontsize=11, color='white')
+        # Set labels and title with scientific radar terminology
+        ax.set_xlabel('Azimuth (m)', fontsize=12, labelpad=10, color='#99CCFF')
+        ax.set_ylabel('Range (m)', fontsize=12, labelpad=10, color='#99CCFF') 
+        ax.set_title('Radar Point Cloud', fontsize=14, color='#DDEEFF', weight='normal')
 
-        # Configure ticks
-        ax.tick_params(axis='x', colors='white', labelsize=8)
-        ax.tick_params(axis='y', colors='white', labelsize=8)
+        # Configure ticks with scientific precision
+        ax.tick_params(axis='x', colors='#99CCFF', labelsize=10, width=1.0, length=4)
+        ax.tick_params(axis='y', colors='#99CCFF', labelsize=10, width=1.0, length=4)
 
-        # Set spine colors
+        # Set spine colors for scientific border
         for spine in ax.spines.values():
-            spine.set_color('white')
+            spine.set_color('#334466')
+            spine.set_linewidth(0.5)
 
-        # Add colorbar
-        fig.colorbar(
+        # Add colorbar with enhanced scientific styling
+        colorbar = fig.colorbar(
             analyzer.viz_components['scatter'],
             ax=ax,
-            label='Intensity',
+            label='Signal Intensity',
             fraction=0.04,
             pad=0.02
         )
+        colorbar.ax.yaxis.label.set_color('#99CCFF')
+        colorbar.ax.tick_params(colors='#99CCFF')
+        analyzer.viz_components['colorbar'] = colorbar
 
-        # Add statistics text boxes
+        # Add statistics text boxes with scientific styling
         analyzer.viz_components['stats_text'] = ax.text(
             0.02, 0.98, '',
             transform=ax.transAxes,
             verticalalignment='top',
-            fontsize=8,
-            color='white',
+            fontsize=9,
+            color='#99CCFF',
             bbox=dict(
-                boxstyle='round',
-                facecolor='#000040',
-                alpha=0.7,
-                edgecolor='white'
+                boxstyle='round,pad=0.3',
+                facecolor='#051530',
+                alpha=0.8,
+                edgecolor='#334488'
             )
         )
 
@@ -123,188 +244,26 @@ def setup_visualization(analyzer) -> plt.Figure:
             0.02, 0.8, '',
             transform=ax.transAxes,
             verticalalignment='top',
-            fontsize=8,
-            color='white',
+            fontsize=9,
+            color='#99CCFF',
             bbox=dict(
-                boxstyle='round',
-                facecolor='green',
-                alpha=0.7,
-                edgecolor='white'
+                boxstyle='round,pad=0.3',
+                facecolor='#051530',
+                alpha=0.8,
+                edgecolor='#334488'
             )
         )
+        
+        # Enable subtle grid for scientific precision
+        ax.grid(True, linestyle=':', linewidth=0.2, alpha=0.3, color='#223366')
 
         # Setup heatmap
-        setup_heatmap_visualization(analyzer)
+        # setup_heatmap_visualization(analyzer) # Removed heatmap setup
         fig.tight_layout()
 
         return fig
     except Exception as e:
         analyzer.get_logger().error(f"Error setting up visualization: {str(e)}")
-        # Return a minimal figure in case of error
-        return plt.figure()
-
-
-def setup_heatmap_visualization(analyzer) -> plt.Figure:
-    """
-    Set up the heatmap visualization figure.
-    
-    This method creates a PyPlot figure for heatmap display of point cloud
-    intensity data, including range circles, angle markers, and UI components.
-    
-    Args:
-        analyzer: RadarPointCloudAnalyzer instance.
-        
-    Returns:
-        plt.Figure: The created figure.
-    """
-    try:
-        # Create figure and axis
-        fig, ax = plt.subplots(figsize=(10, 8))
-        
-        # Set background color
-        ax.set_facecolor('#101020')
-        fig.patch.set_facecolor('#101020')
-        
-        # Use equal aspect ratio to keep circles circular
-        ax.set_aspect('equal')
-        
-        # Create empty heatmap as placeholder
-        cmap = plt.cm.get_cmap('plasma')
-        norm = colors.PowerNorm(gamma=0.5, vmin=analyzer.params.noise_floor, vmax=1.0)
-        
-        # Create grid appropriately sized to match data
-        grid_size = getattr(analyzer, 'heatmap_data', None)
-        if grid_size is None or grid_size.size == 0:
-            grid_size = calculate_heatmap_size(analyzer.params)
-            grid_data = np.zeros(grid_size, dtype=np.float32)
-        else:
-            grid_data = analyzer.heatmap_data
-        
-        # Create heatmap with correct extent
-        max_range = analyzer.params.max_range
-        analyzer.heatmap_viz['heatmap'] = ax.imshow(
-            grid_data, 
-            extent=[-max_range, max_range, 0, max_range],
-            origin='lower',
-            cmap=cmap,
-            norm=norm,
-            aspect='auto',
-            interpolation='bilinear',
-            alpha=0.9
-        )
-        
-        analyzer.heatmap_viz['norm'] = norm
-        analyzer.heatmap_viz['contour'] = None
-        analyzer.heatmap_viz['contour_levels'] = 8
-        
-        # Add colorbar with scientific styling
-        colorbar = fig.colorbar(
-            analyzer.heatmap_viz['heatmap'], 
-            ax=ax, 
-            label='Signal Intensity', 
-            fraction=0.03, 
-            pad=0.02
-        )
-        colorbar.ax.tick_params(labelsize=8, colors='white')
-        colorbar.set_label('Signal Intensity', color='white', size=10)
-        analyzer.heatmap_viz['colorbar'] = colorbar
-        
-        # Add range circles
-        for r in range(0, int(analyzer.params.max_range) + 1, int(analyzer.params.circle_interval)):
-            if r == 0:
-                continue
-            circle = plt.Circle((0, 0), r, fill=False, color='white', alpha=0.3, linestyle=':')
-            ax.add_patch(circle)
-            
-            # Add range labels for major circles - main radar view only displays along positive y-axis
-            ax.text(0.25, r, f"{r}m", color='white', fontsize=8, ha='right', va='center')
-        
-        # Add angle markers
-        for angle in range(-90, 91, 30):
-            if angle == 0:
-                continue
-            angle_rad = np.radians(angle)
-            x_end = analyzer.params.max_range * np.sin(angle_rad)
-            y_end = analyzer.params.max_range * np.cos(angle_rad)
-            ax.plot([0, x_end], [0, y_end], color='white', linestyle=':', alpha=0.3)
-            
-            # Add angle label at range matching primary circle
-            label_distance = analyzer.params.circle_distance * 1.2  # Slightly beyond for cleaner display
-            x_label = label_distance * np.sin(angle_rad)
-            y_label = label_distance * np.cos(angle_rad)
-            ax.text(x_label, y_label, f"{angle}°", color='white', fontsize=8, ha='center', va='center')
-        
-        # Add primary axis (0 degrees)
-        ax.plot([0, 0], [0, analyzer.params.max_range], color='#44BB88', alpha=0.5)
-        
-        # Add target distance arc
-        target_arc = plt.Circle(
-            (0, 0), 
-            analyzer.params.target_distance, 
-            fill=False, 
-            color='white', 
-            alpha=0.7
-        )
-        ax.add_patch(target_arc)
-        
-        # Add sensor position indicator
-        sensor_dot = plt.Circle((0, 0), 0.4, fill=True, color='#AAEEFF', alpha=0.8)
-        ax.add_patch(sensor_dot)
-        
-        # Add primary sampling circle
-        circle_distance = getattr(analyzer.params, 'circle_distance', 5.0)
-        circle_radius = getattr(analyzer.params, 'circle_radius', 1.0)
-        
-        # Store in analyzer for later reference and updates
-        analyzer.heatmap_viz['fig'] = fig
-        analyzer.heatmap_viz['ax'] = ax
-        
-        # Add circles
-        if hasattr(analyzer.params, 'circles'):
-            for i, circle_config in enumerate(analyzer.params.circles):
-                if not circle_config['enabled']:
-                    continue
-                    
-                # Get position based on distance and angle
-                angle_rad = circle_config['angle'] * (np.pi / 180.0)
-                x_pos = circle_config['distance'] * np.sin(angle_rad)
-                y_pos = circle_config['distance'] * np.cos(angle_rad)
-                
-                # Create circle with scientific styling
-                sampling_circle = plt.Circle(
-                    (x_pos, y_pos),
-                    circle_config['radius'],
-                    fill=False,
-                    color=circle_config['color'],
-                    linestyle='-',
-                    linewidth=1.2,
-                    alpha=0.8
-                )
-                ax.add_patch(sampling_circle)
-
-        # Set plot limits
-        ax.set_xlim(-analyzer.params.max_range, analyzer.params.max_range)
-        ax.set_ylim(0, 2 * analyzer.params.max_range)
-        
-        # Add labels
-        ax.set_xlabel('Cross-Range (m)', fontsize=10, labelpad=8, color='white')
-        ax.set_ylabel('Range (m)', fontsize=10, labelpad=8, color='white')
-        ax.set_title('Radar Intensity Map', fontsize=11, color='white')
-
-        # Configure ticks
-        ax.tick_params(axis='x', colors='white', labelsize=8)
-        ax.tick_params(axis='y', colors='white', labelsize=8)
-
-        # Set spine colors
-        for spine in ax.spines.values():
-            spine.set_edgecolor('white')
-
-        # SNR text removed to reduce interface bloat
-
-        fig.tight_layout()
-        return fig
-    except Exception as e:
-        analyzer.get_logger().error(f"Error setting up heatmap: {str(e)}")
         # Return a minimal figure in case of error
         return plt.figure()
 
@@ -366,26 +325,68 @@ def update_plot(analyzer, frame: int) -> Sequence[Artist]:
             # Update scatter plot only if data exists
             if len(x) > 0 and scatter is not None:
                 # Use preallocated array if possible
+                # Apply coordinate flip for display ONLY here
+                display_x = -x
                 if hasattr(analyzer, '_offset_array') and analyzer._offset_array.shape[0] == len(x):
-                    analyzer._offset_array[:, 0] = x
+                    analyzer._offset_array[:, 0] = display_x
                     analyzer._offset_array[:, 1] = y
                     scatter.set_offsets(analyzer._offset_array)
                 else:
                     # Create new array and cache for future use
-                    analyzer._offset_array = np.column_stack((x, y))
+                    analyzer._offset_array = np.column_stack((display_x, y))
                     scatter.set_offsets(analyzer._offset_array)
                 
+                # Enhance intensity visualization with normalized values and improved contrast
+                # Calculate point distances for dynamic sizing and color adjustment
+                if not hasattr(analyzer, '_distances_cache') or analyzer._distances_cache.shape[0] != len(x):
+                    analyzer._distances_cache = np.sqrt(np.square(x) + np.square(y))
+                
+                # Dynamic point sizing based on distance - farther points get slightly larger for better visibility
+                max_distance = analyzer.params.max_range
+                base_size = 12  # Base marker size
+                distance_factor = 1.5  # How much to scale size by distance
+                
+                # Calculate sizes array (larger for more distant points)
+                relative_distances = analyzer._distances_cache / max_distance
+                sizes = base_size + (relative_distances * distance_factor * base_size)
+                scatter.set_sizes(sizes)
+                
+                # Enhanced intensity normalization that emphasizes differences
+                # Use histogram equalization approach for better contrast
+                if len(intensities) > 10:
+                    sorted_intensities = np.sort(intensities)
+                    percentile_min = np.percentile(intensities, 5)  # 5th percentile as lower bound
+                    percentile_max = np.percentile(intensities, 98)  # 98th percentile as upper bound
+                    
+                    # Ensure reasonable bounds
+                    vmin = max(0.05, percentile_min)
+                    vmax = max(vmin + 0.1, percentile_max)
+                    
+                    # Use non-linear normalization for better visual contrast
+                    norm = colors.PowerNorm(gamma=0.7, vmin=vmin, vmax=vmax)
+                else:
+                    # Fallback for sparse data
+                    norm = colors.Normalize(vmin=0.1, vmax=max(0.2, np.max(intensities)))
+                
                 scatter.set_array(intensities)
+                scatter.set_norm(norm)
+                
+                # Update colorbar to match new normalization
+                if hasattr(analyzer.viz_components, 'colorbar') and analyzer.viz_components['colorbar'] is not None:
+                    analyzer.viz_components['colorbar'].update_norm(norm)
+                
                 artists.append(scatter)
 
                 # Update circle scatter - reuse existing arrays when possible
                 if len(circle_x) > 0 and circle_scatter is not None:
+                    # Apply coordinate flip for display ONLY here
+                    display_circle_x = -circle_x
                     if hasattr(analyzer, '_circle_offset_array') and analyzer._circle_offset_array.shape[0] == len(circle_x):
-                        analyzer._circle_offset_array[:, 0] = circle_x
+                        analyzer._circle_offset_array[:, 0] = display_circle_x
                         analyzer._circle_offset_array[:, 1] = circle_y
                         circle_scatter.set_offsets(analyzer._circle_offset_array)
                     else:
-                        analyzer._circle_offset_array = np.column_stack((circle_x, circle_y))
+                        analyzer._circle_offset_array = np.column_stack((display_circle_x, circle_y))
                         circle_scatter.set_offsets(analyzer._circle_offset_array)
                     artists.append(circle_scatter)
                 elif circle_scatter is not None:
@@ -435,7 +436,7 @@ def update_plot(analyzer, frame: int) -> Sequence[Artist]:
                 analyzer._existing_artists_cache = artists.copy()
 
             # Update live heatmap (handled in separate method)
-            update_heatmap_display(analyzer, frame)
+            # update_heatmap_display(analyzer, frame) # Removed heatmap display update
 
             # Return a valid sequence of artists
             return artists
@@ -446,142 +447,6 @@ def update_plot(analyzer, frame: int) -> Sequence[Artist]:
         if analyzer.viz_components['scatter'] is not None:
             return [analyzer.viz_components['scatter']]
         return []
-
-
-def update_heatmap_display(analyzer, frame: int) -> None:
-    """
-    Update the heatmap visualization (separated from update_plot for thread safety).
-    
-    This method updates the heatmap display, including intensity values and contour lines.
-    SNR metrics have been removed to reduce interface bloat.
-    
-    Args:
-        analyzer: RadarPointCloudAnalyzer instance.
-        frame: Frame index for updates.
-    """
-    # Skip more frames to reduce load
-    if frame % 3 != 0:  # Increased from 2 to 3
-        return
-        
-    try:
-        if analyzer.heatmap_viz['heatmap'] is not None:
-            # Cache noise floor value
-            noise_floor = getattr(analyzer, '_cached_noise_floor', 0.05)
-            
-            # Only create copy when needed
-            if not hasattr(analyzer, '_heatmap_data_thresholded') or frame % 9 == 0:
-                heatmap_data_thresholded = analyzer.live_heatmap_data.copy()
-                heatmap_data_thresholded[heatmap_data_thresholded < noise_floor] = 0
-                analyzer._heatmap_data_thresholded = heatmap_data_thresholded
-            else:
-                heatmap_data_thresholded = analyzer._heatmap_data_thresholded
-
-            # Update colormap normalization less frequently
-            if frame % 10 == 0:  # Reduced frequency
-                nonzero_values = heatmap_data_thresholded[heatmap_data_thresholded > 0]
-                if nonzero_values.size > 0:
-                    vmax = np.percentile(nonzero_values, 98)
-                    if vmax < 0.1:
-                        vmax = 0.1
-
-                    # Adjust power normalization based on point density
-                    density_ratio = nonzero_values.size / heatmap_data_thresholded.size
-                    if density_ratio < 0.01:
-                        power = 0.3
-                    elif density_ratio > 0.2:
-                        power = 0.7
-                    else:
-                        power = 0.5
-
-                    # Only update norm if values changed significantly
-                    update_norm = False
-                    if not hasattr(analyzer, '_last_norm_params'):
-                        update_norm = True
-                    else:
-                        last_vmax, last_power = analyzer._last_norm_params
-                        if abs(last_vmax - vmax) > 0.05 or abs(last_power - power) > 0.05:
-                            update_norm = True
-                    
-                    if update_norm:
-                        analyzer._last_norm_params = (vmax, power)
-                        analyzer.heatmap_viz['norm'] = colors.PowerNorm(gamma=power, vmin=noise_floor, vmax=vmax)
-                        analyzer.heatmap_viz['heatmap'].set_norm(analyzer.heatmap_viz['norm'])
-
-            # Update heatmap data every time
-            analyzer.heatmap_viz['heatmap'].set_data(heatmap_data_thresholded)
-            
-            # Update contours even less frequently
-            if frame % 20 == 0 and analyzer.heatmap_viz['contour_levels'] > 0:  # Reduced frequency
-                # Safely remove old contours
-                if analyzer.heatmap_viz['contour'] is not None:
-                    try:
-                        # Clear contour reference first
-                        old_contour = analyzer.heatmap_viz['contour']
-                        analyzer.heatmap_viz['contour'] = None
-                        
-                        # If axis exists, clear collections safely
-                        ax = analyzer.heatmap_viz['ax']
-                        if ax is not None and hasattr(ax, 'collections'):
-                            # First try to identify and remove specific contour collections
-                            if hasattr(old_contour, 'collections'):
-                                try:
-                                    for coll in old_contour.collections:
-                                        try:
-                                            if coll in ax.collections:
-                                                coll.remove()
-                                        except Exception as e:
-                                            analyzer.get_logger().debug(f"Error removing specific collection: {str(e)}")
-                                except Exception as e:
-                                    analyzer.get_logger().debug(f"Error processing contour collections: {str(e)}")
-                            
-                            # Fallback: remove collections one by one
-                            # Only if we still have collections and couldn't identify specific ones
-                            remaining_attempts = 10  # Limit removal attempts to prevent infinite loops
-                            while len(ax.collections) > 0 and remaining_attempts > 0:
-                                try:
-                                    ax.collections[0].remove()
-                                    remaining_attempts -= 1
-                                except Exception as e:
-                                    analyzer.get_logger().debug(f"Error removing collection: {str(e)}")
-                                    # Break immediately to avoid getting stuck
-                                    break
-                    except Exception as e:
-                        analyzer.get_logger().debug(f"Error clearing contours: {str(e)}")
-                
-                # Create new contours
-                nonzero_count = np.count_nonzero(heatmap_data_thresholded)
-                if nonzero_count > 20:  # Only add contours if we have data
-                    try:
-                        # Use lower resolution data for contours
-                        downsampled = heatmap_data_thresholded[::2, ::2]
-                        if np.max(downsampled) > noise_floor:
-                            # Generate levels for contours
-                            levels = np.linspace(
-                                noise_floor, 
-                                np.max(downsampled),
-                                analyzer.heatmap_viz['contour_levels']
-                            )
-                            
-                            # Check if levels are valid
-                            if len(levels) > 1 and levels[-1] > levels[0]:
-                                # Add contours
-                                analyzer.heatmap_viz['contour'] = analyzer.heatmap_viz['ax'].contour(
-                                    downsampled,
-                                    levels=levels,
-                                    extent=[-analyzer.params.max_range, 
-                                           analyzer.params.max_range, 
-                                           0, analyzer.params.max_range],
-                                    colors='white',
-                                    alpha=0.4,
-                                    linewidths=0.5
-                                )
-                            else:
-                                analyzer.get_logger().debug(f"Invalid contour levels: min={levels[0]}, max={levels[-1]}")
-                    except Exception as e:
-                        analyzer.get_logger().debug(f"Error creating contours: {str(e)}")
-                    
-    except Exception as e:
-        analyzer.get_logger().error(f"Error updating heatmap display: {str(e)}")
 
 
 def _update_circle_properties(analyzer, center=None, radius=None) -> None:
@@ -882,3 +747,6 @@ def save_visualization(analyzer, config_dir: str, timestamp: str) -> None:
         analyzer.get_logger().info(f'Saved visualization to {viz_file}')
     except Exception as e:
         analyzer.get_logger().error(f"Error saving visualization: {str(e)}")
+
+
+# Removed calculate_heatmap_size function

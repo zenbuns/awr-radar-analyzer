@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 Processing package for radar point cloud data.
 
@@ -6,7 +8,6 @@ including filtering, heatmap generation, and multi-frame processing.
 """
 
 from .data_processor import (
-    calculate_heatmap_size,
     filter_points_in_circle,
     update_heatmap_vectorized,
     update_live_heatmap_vectorized,
@@ -22,7 +23,6 @@ from .multi_frame import (
 )
 
 __all__ = [
-    'calculate_heatmap_size',
     'filter_points_in_circle',
     'update_heatmap_vectorized',
     'update_live_heatmap_vectorized',

@@ -46,14 +46,14 @@ circles:
     label: "Primary"
   left:                     # Left sampling circle
     enabled: false
-    distance: 15.0
+    distance: 5.0
     radius: 0.5
     angle: -60.0            # Negative angle = left side
     color: "cyan"
     label: "Left"
   right:                    # Right sampling circle
     enabled: false
-    distance: 25.0
+    distance: 5.0
     radius: 0.5
     angle: 60.0             # Positive angle = right side
     color: "yellow"

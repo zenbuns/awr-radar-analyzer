@@ -8,6 +8,7 @@ all the UI components and connects them to the radar analyzer.
 """
 
 import os
+import csv
 import numpy as np
 from datetime import datetime
 from PyQt5.QtWidgets import (
@@ -20,9 +21,9 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QTimer, pyqtSlot, QSize, QUrl, QThread, pyqtSignal, QObject
 from PyQt5.QtGui import QIcon, QPixmap, QFont, QDesktopServices
 import time
+import math # For checking float values near zero
 
 from ui.scatter_view import ScatterView
-from ui.heatmap_view import HeatmapView
 from ui.control_panel import ControlPanel
 from utils.visualization import save_scientific_visualization
 from .styles import DARK_STYLESHEET, Colors, apply_mpl_style
@@ -70,11 +71,7 @@ class CombinedView(QWidget):
         self.scatter_toggle.toggled.connect(self.toggle_scatter_view)
         controls_layout.addWidget(self.scatter_toggle)
         
-        # Create heatmap toggle
-        self.heatmap_toggle = QCheckBox("Show Heatmap")
-        self.heatmap_toggle.setChecked(True)
-        self.heatmap_toggle.toggled.connect(self.toggle_heatmap_view)
-        controls_layout.addWidget(self.heatmap_toggle)
+        # Heatmap toggle removed to hide heatmap from UI
         
         # Add controls to main layout
         main_layout.addLayout(controls_layout)
@@ -92,19 +89,18 @@ class CombinedView(QWidget):
             heatmap_view: HeatmapView instance.
         """
         self.scatter_view = scatter_view
-        self.heatmap_view = heatmap_view
+        self.heatmap_view = heatmap_view  # Store reference but don't add to UI
         
-        # Add views to splitter
+        # Add only scatter view to splitter
         if self.scatter_view and self.scatter_view.parent() != self.splitter:
             self.splitter.addWidget(self.scatter_view)
         
-        if self.heatmap_view and self.heatmap_view.parent() != self.splitter:
-            self.splitter.addWidget(self.heatmap_view)
+        # Heatmap view is kept in memory but not added to the UI
         
-        # Set equal sizes
-        if self.splitter.count() == 2:
+        # Adjust splitter
+        if self.splitter.count() == 1:
             width = self.splitter.width()
-            self.splitter.setSizes([width // 2, width // 2])
+            self.splitter.setSizes([width])
     
     def toggle_scatter_view(self, checked):
         """
@@ -151,26 +147,42 @@ class MainWindow(QMainWindow):
         """
         super().__init__()
         
-        # Store analyzer reference
+        # Initialize analyzer
         self.analyzer = analyzer
         
         # UI components
         self.scatter_view = None
-        self.heatmap_view = None
-        self.combined_view = None
         self.control_panel = None
+        self.status_bar = None
+        self.progress_bar = None
+        self.combined_view = None
         
-        # Apply dark style to matplotlib
-        apply_mpl_style()
+        # State tracking
+        self.collection_active = False
+        self.export_thread = None
+        self.export_worker = None
+        self.export_timer = None
+        self.export_cancelled = False
         
-        # Set up the UI
+        # Session report path - store CSV path for the session
+        self.session_report_path = None
+        
+        # Counter for generate report actions in this session
+        self.generate_counter = 0
+        
+        # Initialize UI
         self.init_ui()
         
         # Initialize the combined view with the scatter and heatmap views
-        self.combined_view.set_views(self.scatter_view, self.heatmap_view)
+        self.combined_view.set_views(self.scatter_view, None)
         
         # Connect signals and slots
         self.connect_signals()
+        
+        # Initialize the control panel checkboxes to match the scatter view settings
+        if self.scatter_view and self.control_panel:
+            self.control_panel.trail_visibility_checkbox.setChecked(self.scatter_view.show_trail)
+            self.control_panel.density_coloring_checkbox.setChecked(self.scatter_view.use_density_coloring)
         
         # Setup periodic update timer
         self.update_timer = QTimer(self)
@@ -217,11 +229,11 @@ class MainWindow(QMainWindow):
         
         # Create scatter view and heatmap view instances without adding them to tabs
         self.scatter_view = ScatterView(self)
-        self.heatmap_view = HeatmapView(self)
+        # self.heatmap_view = HeatmapView(self) # Removed heatmap view instantiation
         
         # Create and add combined view tab
         self.combined_view = CombinedView(self)
-        tabs.addTab(self.combined_view, "Combined View")
+        tabs.addTab(self.combined_view, "2D View")
         
         # Connect tab change signal to handle view reparenting
         tabs.currentChanged.connect(self.handle_tab_change)
@@ -278,7 +290,7 @@ class MainWindow(QMainWindow):
         save_heatmap_action = QAction("&Save Heatmap", self)
         save_heatmap_action.setShortcut("Ctrl+S")
         save_heatmap_action.triggered.connect(self.save_heatmap)
-        file_menu.addAction(save_heatmap_action)
+        # file_menu.addAction(save_heatmap_action) # Removed save heatmap action
         
         export_plot_action = QAction("&Export Plot", self)
         export_plot_action.setShortcut("Ctrl+E")
@@ -297,7 +309,7 @@ class MainWindow(QMainWindow):
         
         start_collection_action = QAction("&Start Collection", self)
         start_collection_action.setShortcut("Ctrl+Space")
-        start_collection_action.triggered.connect(self.start_data_collection)
+        start_collection_action.triggered.connect(self.start_data_collection_with_params)
         data_menu.addAction(start_collection_action)
         
         stop_collection_action = QAction("Sto&p Collection", self)
@@ -316,8 +328,7 @@ class MainWindow(QMainWindow):
         
         gen_report_action = QAction("&Generate Report", self)
         gen_report_action.setShortcut("Ctrl+G")
-        # Temporarily disable the connection to fix the AttributeError
-        # gen_report_action.triggered.connect(self.generate_report)
+        gen_report_action.triggered.connect(self.generate_report)
         data_menu.addAction(gen_report_action)
         
         # View menu
@@ -345,45 +356,34 @@ class MainWindow(QMainWindow):
         reset_heatmap_action = QAction("Reset &Heatmap", self)
         reset_heatmap_action.setShortcut("Ctrl+Shift+R")
         reset_heatmap_action.triggered.connect(self.reset_heatmap)
-        view_menu.addAction(reset_heatmap_action)
+        # view_menu.addAction(reset_heatmap_action) # Removed reset heatmap action
         
         # Visualization performance submenu
         perf_menu = view_menu.addMenu("&Performance Settings")
-        
-        high_perf_action = QAction("&High Performance", self)
-        high_perf_action.triggered.connect(lambda: self.configure_heatmap_update_params(0.1, 0.5, 30))
-        perf_menu.addAction(high_perf_action)
-        
-        medium_perf_action = QAction("&Medium Performance", self)
-        medium_perf_action.triggered.connect(lambda: self.configure_heatmap_update_params(0.2, 0.7, 20))
-        perf_menu.addAction(medium_perf_action)
-        
-        low_perf_action = QAction("&Low Performance", self)
-        low_perf_action.triggered.connect(lambda: self.configure_heatmap_update_params(0.3, 1.0, 15))
-        perf_menu.addAction(low_perf_action)
         
         perf_menu.addSeparator()
         
         auto_perf_action = QAction("&Auto-Optimize", self)
         auto_perf_action.triggered.connect(self.optimize_visualization_pipeline)
-        perf_menu.addAction(auto_perf_action)
+        # perf_menu.addAction(auto_perf_action) # Auto-optimize likely tied to heatmap, remove for now
         
         view_menu.addSeparator()
         
         # Visualization mode submenu
         mode_menu = view_menu.addMenu("Visualization &Mode")
         
-        heatmap_mode_action = QAction("&Heatmap", self)
-        heatmap_mode_action.triggered.connect(lambda: self.set_visualization_mode("heatmap"))
-        mode_menu.addAction(heatmap_mode_action)
+        # Removed heatmap/contour/combined mode actions
+        # heatmap_mode_action = QAction("&Heatmap", self)
+        # heatmap_mode_action.triggered.connect(lambda: self.set_visualization_mode("heatmap"))
+        # mode_menu.addAction(heatmap_mode_action)
         
-        contour_mode_action = QAction("&Contour", self)
-        contour_mode_action.triggered.connect(lambda: self.set_visualization_mode("contour"))
-        mode_menu.addAction(contour_mode_action)
+        # contour_mode_action = QAction("&Contour", self)
+        # contour_mode_action.triggered.connect(lambda: self.set_visualization_mode("contour"))
+        # mode_menu.addAction(contour_mode_action)
         
-        combined_mode_action = QAction("Co&mbined", self)
-        combined_mode_action.triggered.connect(lambda: self.set_visualization_mode("combined"))
-        mode_menu.addAction(combined_mode_action)
+        # combined_mode_action = QAction("Co&mbined", self)
+        # combined_mode_action.triggered.connect(lambda: self.set_visualization_mode("combined"))
+        # mode_menu.addAction(combined_mode_action)
         
         # Colormap submenu
         colormap_menu = view_menu.addMenu("&Colormap")
@@ -422,7 +422,7 @@ class MainWindow(QMainWindow):
         reset_action = QAction(QIcon(":/icons/reset.png"), "Reset Heatmap", self)
         reset_action.triggered.connect(self.reset_heatmap)
         reset_action.setStatusTip("Reset the heatmap data")
-        toolbar.addAction(reset_action)
+        # toolbar.addAction(reset_action) # Removed reset heatmap toolbar action
         
         export_action = QAction(QIcon(":/icons/export.png"), "Export Plot", self)
         export_action.triggered.connect(self.export_scientific_plot)
@@ -449,17 +449,21 @@ class MainWindow(QMainWindow):
         
         self.control_panel.start_collection.connect(self.start_data_collection_with_params)
         self.control_panel.stop_collection.connect(self.stop_data_collection)
-        self.control_panel.reset_heatmap.connect(self.reset_heatmap)
-        self.control_panel.colormap_changed.connect(self.set_colormap)
-        self.control_panel.decay_factor_changed.connect(self.set_decay_factor)
-        self.control_panel.visualization_mode_changed.connect(self.set_visualization_mode)
-        self.control_panel.noise_floor_changed.connect(self.set_noise_floor)
-        self.control_panel.smoothing_changed.connect(self.set_smoothing)
-        self.control_panel.add_roi.connect(self.add_roi)
-        self.control_panel.clear_rois.connect(self.clear_rois)
-        self.control_panel.save_heatmap.connect(self.save_heatmap)
+        # self.control_panel.reset_heatmap.connect(self.reset_heatmap) # Removed heatmap signal
+        # self.control_panel.colormap_changed.connect(self.set_colormap) # Removed heatmap signal
+        # self.control_panel.decay_factor_changed.connect(self.set_decay_factor) # Removed heatmap signal
+        # self.control_panel.visualization_mode_changed.connect(self.set_visualization_mode) # Removed heatmap signal
+        # self.control_panel.noise_floor_changed.connect(self.set_noise_floor) # Removed heatmap signal
+        # self.control_panel.smoothing_changed.connect(self.set_smoothing) # Removed heatmap signal
+        # self.control_panel.add_roi.connect(self.add_roi) # Removed heatmap signal
+        # self.control_panel.clear_rois.connect(self.clear_rois) # Removed heatmap signal
+        # self.control_panel.save_heatmap.connect(self.save_heatmap) # Removed heatmap signal
         self.control_panel.export_plot.connect(self.export_scientific_plot)
         self.control_panel.generate_report.connect(self.generate_report)
+        self.control_panel.trail_duration_changed.connect(self.set_trail_duration)
+        self.control_panel.trail_decay_factor_changed.connect(self.set_trail_decay_factor)
+        self.control_panel.trail_visibility_changed.connect(self.set_trail_visibility)
+        self.control_panel.density_coloring_changed.connect(self.set_density_coloring)
         
         # Connect ROS2 bag playback and recording signals
         self.control_panel.play_rosbag.connect(self.play_rosbag)
@@ -470,7 +474,8 @@ class MainWindow(QMainWindow):
         
         # Connect analyzer signals for playback progress updates
         if hasattr(self.analyzer, 'signals') and hasattr(self.analyzer.signals, 'update_playback_position_signal'):
-            self.analyzer.signals.update_playback_position_signal.connect(self.update_playback_position)
+            # Connect analyzer signal to ControlPanel's specific update slot
+            self.analyzer.signals.update_playback_position_signal.connect(self.control_panel.update_playback_position)
         
         # Connect to data reset signal for handling PCL resets
         if hasattr(self.analyzer, 'signals') and hasattr(self.analyzer.signals, 'data_reset_signal'):
@@ -540,10 +545,10 @@ class MainWindow(QMainWindow):
                 self.scatter_view.update_circle_stats(circle_stats)
                 
                 # Get a reference to heatmap data (avoid copying the large array if possible)
-                heatmap_data = self.analyzer.live_heatmap_data
+                # heatmap_data = self.analyzer.live_heatmap_data # Removed heatmap data reference
                 
                 # Update heatmap data through the improved, optimized pipeline
-                self.heatmap_view.update_heatmap_data(heatmap_data)
+                # self.heatmap_view.update_heatmap_data(heatmap_data) # Removed heatmap update
                 
                 # Update analysis metrics - only do this periodically as it's CPU intensive
                 # Use a counter to update every 10 frames to reduce CPU load
@@ -551,8 +556,9 @@ class MainWindow(QMainWindow):
                     self._metrics_update_counter = 0
                 
                 if self._metrics_update_counter % 10 == 0:
-                    metrics = self.analyzer.compute_heatmap_metrics()
-                    self.control_panel.update_metrics(metrics)
+                    # metrics = self.analyzer.compute_heatmap_metrics() # Removed heatmap metrics calculation
+                    # self.control_panel.update_metrics(metrics) # Removed metrics update
+                    pass # Placeholder if no other metrics are updated
                 
                 self._metrics_update_counter += 1
         except Exception as e:
@@ -566,7 +572,7 @@ class MainWindow(QMainWindow):
         
         Args:
             index: Index of the circle to update (0-2)
-            distance: New circle distance in meters.
+            distance: New distance from origin in meters.
         """
         # Update analyzer
         if self.analyzer is not None:
@@ -576,16 +582,20 @@ class MainWindow(QMainWindow):
             if hasattr(self.analyzer, 'params'):
                 self.analyzer.params.update_circle_distance(index, distance)
         
-        # Get the angle for this circle
-        angle = 0
-        if index == 1:
-            angle = -60
-        elif index == 2:
-            angle = 60
-        
-        # Update views
-        self.scatter_view.update_circle_position(index, distance, angle)
-        self.heatmap_view.update_circle_position(index, distance, angle)
+        # Get the CURRENT angle for this circle from the parameters
+        current_angle = 0.0 # Default fallback
+        try:
+            if self.analyzer and hasattr(self.analyzer, 'params') and 0 <= index < len(self.analyzer.params.circles):
+                current_angle = self.analyzer.params.circles[index].angle
+            else:
+                print(f"Warning: Could not get current angle for circle {index}. Using fallback {current_angle}.")
+        except (AttributeError, IndexError) as e:
+             print(f"Error getting angle for circle {index}: {e}. Using fallback {current_angle}.")
+
+        # Update views with the new distance and the CURRENT angle
+        if self.scatter_view:
+            self.scatter_view.update_circle_config(index, distance=distance, angle=current_angle)
+        # self.heatmap_view.update_circle_position(index, distance, angle) # Removed heatmap view update
     
     @pyqtSlot(int, float)
     def update_circle_radius(self, index, radius):
@@ -605,28 +615,49 @@ class MainWindow(QMainWindow):
                 self.analyzer.params.update_circle_radius(index, radius)
         
         # Update views
-        self.scatter_view.update_circle_radius(index, radius)
-        self.heatmap_view.update_circle_radius(index, radius)
+        self.scatter_view.update_circle_config(index, radius=radius)
+        # self.heatmap_view.update_circle_radius(index, radius) # Removed heatmap view update
     
     @pyqtSlot(int, float)
     def update_circle_angle(self, index, angle):
         """
-        Update circle angle in views.
-        
+        Update circle angle in views and analyzer.
+
         Args:
             index: Index of the circle to update (0-2)
             angle: New angle in degrees.
         """
-        # Get current distance for this circle
-        distance = 5.0
-        if index == 1:
-            distance = 15.0
-        elif index == 2:
-            distance = 25.0
-            
-        # Update views with both distance and new angle
-        self.scatter_view.update_circle_position(index, distance, angle)
-        self.heatmap_view.update_circle_position(index, distance, angle)
+        # Update analyzer parameters first
+        if self.analyzer is not None and hasattr(self.analyzer, 'params'):
+            self.analyzer.params.update_circle_angle(index, angle)
+        else:
+            print("Warning: Analyzer or params not found, cannot update backend angle.")
+            return # Don't update visualization if backend wasn't updated
+
+        # Get current distance for this circle from analyzer parameters
+        distance = 5.0 # Default fallback
+        try:
+            if self.analyzer and hasattr(self.analyzer, 'params') and 0 <= index < len(self.analyzer.params.circles):
+                distance = self.analyzer.params.circles[index].distance
+            else:
+                 print(f"Warning: Could not get current distance for circle {index}. Using fallback {distance}.")
+        except (KeyError, IndexError, AttributeError) as e:
+            print(f"Error getting distance for circle {index}: {e}. Using fallback {distance}.")
+
+        # Get the angle that was actually set (potentially clamped)
+        final_angle = angle # Fallback to input angle
+        try:
+            if self.analyzer and hasattr(self.analyzer, 'params') and 0 <= index < len(self.analyzer.params.circles):
+                final_angle = self.analyzer.params.circles[index].angle
+            else:
+                print(f"Warning: Could not get updated angle for circle {index}. Using input value {angle}.")
+        except (AttributeError, IndexError) as e:
+             print(f"Error getting updated angle for circle {index}: {e}. Using input value {angle}.")
+
+        # Update views with current distance and the FINAL (clamped) angle
+        if self.scatter_view:
+            self.scatter_view.update_circle_config(index, distance=distance, angle=final_angle)
+        # self.heatmap_view.update_circle_position(index, distance, angle) # Removed heatmap view update
     
     @pyqtSlot(int, bool)
     def toggle_circle(self, index, enabled):
@@ -638,8 +669,8 @@ class MainWindow(QMainWindow):
             enabled: Whether the circle should be visible
         """
         # Update views
-        self.scatter_view.toggle_circle(index, enabled)
-        self.heatmap_view.toggle_circle(index, enabled)
+        self.scatter_view.update_circle_config(index, enabled=enabled)
+        # self.heatmap_view.toggle_circle(index, enabled) # Removed heatmap view update
         
         # Update analyzer if it exists
         if self.analyzer is not None and hasattr(self.analyzer, 'params'):
@@ -727,10 +758,11 @@ class MainWindow(QMainWindow):
     def reset_heatmap(self):
         """Reset the heatmap visualization."""
         if self.analyzer is not None:
-            self.analyzer.reset_live_heatmap()
+            # self.analyzer.reset_live_heatmap() # Removed analyzer heatmap reset
+            pass # Placeholder
         
-        self.heatmap_view.reset_heatmap()
-        self.status_bar.showMessage("Heatmap reset")
+        # self.heatmap_view.reset_heatmap() # Removed heatmap view reset
+        self.status_bar.showMessage("Heatmap functionality removed")
     
     @pyqtSlot(str)
     def set_colormap(self, colormap):
@@ -740,8 +772,8 @@ class MainWindow(QMainWindow):
         Args:
             colormap: Name of the colormap to use.
         """
-        self.heatmap_view.set_colormap(colormap)
-        self.status_bar.showMessage(f"Colormap set to {colormap}")
+        # self.heatmap_view.set_colormap(colormap) # Removed heatmap view update
+        self.status_bar.showMessage(f"Colormap setting removed (heatmap disabled)")
     
     @pyqtSlot(float)
     def set_decay_factor(self, decay):
@@ -752,8 +784,26 @@ class MainWindow(QMainWindow):
             decay: New decay factor value.
         """
         if self.analyzer is not None:
-            self.analyzer.live_heatmap_decay_factor = decay
+            # self.analyzer.live_heatmap_decay_factor = decay # Removed analyzer decay factor setting
+            pass # Placeholder
+        
+        # If synchronize_trail_decay option is enabled on the control panel, also update the trail
+        if hasattr(self.control_panel, 'sync_trail_decay') and self.control_panel.sync_trail_decay.isChecked():
+            self.set_trail_decay_factor(decay)
+            
         self.status_bar.showMessage(f"Decay factor set to {decay:.3f}")
+    
+    @pyqtSlot(float)
+    def set_trail_decay_factor(self, decay):
+        """
+        Set the decay factor for point trail visualization.
+        
+        Args:
+            decay: New decay factor value (0-1, higher values = slower decay)
+        """
+        if self.scatter_view:
+            self.scatter_view.set_trail_decay_factor(decay)
+            # Don't update status bar here, as this is often called from set_decay_factor
     
     @pyqtSlot(str)
     def set_visualization_mode(self, mode):
@@ -763,8 +813,8 @@ class MainWindow(QMainWindow):
         Args:
             mode: Visualization mode ('heatmap', 'contour', or 'combined').
         """
-        self.heatmap_view.set_visualization_mode(mode)
-        self.status_bar.showMessage(f"Visualization mode set to {mode}")
+        # self.heatmap_view.set_visualization_mode(mode) # Removed heatmap view update
+        self.status_bar.showMessage(f"Visualization mode setting removed (heatmap disabled)")
     
     @pyqtSlot(float)
     def set_noise_floor(self, value):
@@ -774,8 +824,8 @@ class MainWindow(QMainWindow):
         Args:
             value: New noise floor value.
         """
-        self.heatmap_view.set_noise_floor(value)
-        self.status_bar.showMessage(f"Noise floor set to {value:.2f}")
+        # self.heatmap_view.set_noise_floor(value) # Removed heatmap view update
+        self.status_bar.showMessage(f"Noise floor setting removed (heatmap disabled)")
     
     @pyqtSlot(float)
     def set_smoothing(self, value):
@@ -792,102 +842,30 @@ class MainWindow(QMainWindow):
     @pyqtSlot()
     def add_roi(self):
         """Add a Region of Interest to the heatmap."""
-        roi = self.heatmap_view.add_roi()
-        if roi is not None:
-            stats = self.heatmap_view.analyze_roi(roi)
-            if stats:
-                self.status_bar.showMessage(
-                    f"ROI added: avg={stats['mean_intensity']:.2f}, max={stats['max_intensity']:.2f}, "
-                    f"coverage={stats['signal_coverage']*100:.1f}%"
-                )
+        # roi = self.heatmap_view.add_roi() # Removed ROI addition
+        # if roi is not None:
+        #     stats = self.heatmap_view.analyze_roi(roi)
+        #     if stats:
+        #         self.status_bar.showMessage(
+        #             f"ROI added: avg={stats['mean_intensity']:.2f}, max={stats['max_intensity']:.2f}, "
+        #             f"coverage={stats['signal_coverage']*100:.1f}%"
+        #         )
+        self.status_bar.showMessage("ROI functionality removed (heatmap disabled)")
     
     @pyqtSlot()
     def clear_rois(self):
         """Clear all Regions of Interest from the heatmap."""
-        self.heatmap_view.clear_rois()
-        self.status_bar.showMessage("All ROIs cleared")
+        # self.heatmap_view.clear_rois() # Removed ROI clearing
+        self.status_bar.showMessage("ROI functionality removed (heatmap disabled)")
     
     @pyqtSlot()
     def save_heatmap(self):
         """Save the current heatmap data and visualization."""
-        if self.analyzer is None or self.analyzer.live_heatmap_data is None:
-            self.status_bar.showMessage("No heatmap data to save")
-            return
-        
-        try:
-            # Create directory if it doesn't exist
-            data_dir = os.path.expanduser('~/radar_experiment_data/heatmaps')
-            os.makedirs(data_dir, exist_ok=True)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            
-            # Generate default filename
-            default_filename = f"live_heatmap_{timestamp}.png"
-            default_path = os.path.join(data_dir, default_filename)
-            
-            # Create a non-blocking file dialog
-            options = QFileDialog.Options()
-            options |= QFileDialog.DontUseNativeDialog  # Use Qt's dialog instead of native for better control
-            
-            dialog = QFileDialog(self, "Save Heatmap Image", default_path, 
-                                "Image files (*.png *.jpg);;All Files (*)")
-            dialog.setAcceptMode(QFileDialog.AcceptSave)
-            dialog.setDefaultSuffix("png")
-            dialog.setOptions(options)
-            dialog.setWindowModality(Qt.WindowModal)  # Make dialog modal to main window only
-            
-            # Process events before showing dialog to keep UI responsive
-            QApplication.processEvents()
-            
-            # Show dialog and wait for result
-            if dialog.exec_() == QDialog.Accepted:
-                selected_files = dialog.selectedFiles()
-                if selected_files:
-                    viz_file = selected_files[0]
-                    
-                    # Show progress message
-                    self.status_bar.showMessage("Saving heatmap...")
-                    QApplication.processEvents()  # Process events to update UI
-                    
-                    # Save heatmap data as NumPy array (in the background)
-                    heatmap_data_file = os.path.splitext(viz_file)[0] + ".npz"
-                    np.savez_compressed(heatmap_data_file, data=self.analyzer.live_heatmap_data)
-                    
-                    # Save heatmap visualization as PNG
-                    self.heatmap_view.figure.savefig(
-                        viz_file,
-                        dpi=300,
-                        bbox_inches='tight',
-                        facecolor=self.heatmap_view.figure.get_facecolor()
-                    )
-                    
-                    self.status_bar.showMessage(f"Saved heatmap to {os.path.basename(viz_file)}")
-                    
-                    # Ask if user wants to view the saved file - make this non-blocking too
-                    msgBox = QMessageBox(self)
-                    msgBox.setWindowTitle("Save Complete")
-                    msgBox.setText(f"Heatmap saved to:\n{viz_file}")
-                    msgBox.setInformativeText("Would you like to open it?")
-                    msgBox.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-                    msgBox.setDefaultButton(QMessageBox.No)
-                    msgBox.setWindowModality(Qt.WindowModal)  # Modal to main window only
-                    
-                    # Process events before showing message box
-                    QApplication.processEvents()
-                    
-                    if msgBox.exec_() == QMessageBox.Yes:
-                        # Open file with default system application
-                        import subprocess
-                        import sys
-                        if sys.platform == 'win32':
-                            os.startfile(viz_file)
-                        elif sys.platform == 'darwin':  # macOS
-                            subprocess.call(['open', viz_file])
-                        else:  # Linux
-                            subprocess.call(['xdg-open', viz_file])
-    
-        except Exception as e:
-            self.status_bar.showMessage(f"Error saving heatmap: {str(e)}")
-            QMessageBox.critical(self, "Save Error", f"Failed to save heatmap: {str(e)}")
+        # if self.analyzer is None or self.analyzer.live_heatmap_data is None: # Removed heatmap check
+        #     self.status_bar.showMessage("No heatmap data to save")
+        #     return
+        self.status_bar.showMessage("Save heatmap functionality removed")
+        # Removed all saving logic
     
     @pyqtSlot()
     def export_scientific_plot(self):
@@ -1315,6 +1293,9 @@ class MainWindow(QMainWindow):
     @pyqtSlot()
     def generate_report(self):
         """Generate a report of collected radar data automatically without UI interactions."""
+        # Increment the session generate counter
+        self.generate_counter += 1
+        
         if self.analyzer is None:
             self.status_bar.showMessage("No analyzer instance available")
             if hasattr(self.control_panel, 'on_report_completed'):
@@ -1333,80 +1314,93 @@ class MainWindow(QMainWindow):
             self.control_panel.state_manager.transition('lock_ui')
         
         try:
-            # Before generating report, calculate the enhanced metrics for distance bands
-            self._enhance_distance_band_metrics()
-            
             # Automatically create report directory if it doesn't exist
             default_dir = os.path.expanduser('~/radar_experiment_data/reports')
             os.makedirs(default_dir, exist_ok=True)
             
-            # Generate unique filename with timestamp
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            file_path = os.path.join(default_dir, f"radar_report_{timestamp}.html")
+            # Check if we already have a session report file, and use it if available
+            if not hasattr(self, 'session_report_path') or self.session_report_path is None:
+                # First time generating report in this session - create a new file
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                self.session_report_path = os.path.join(default_dir, f"radar_report_{timestamp}.csv")
+            
+            # Use the session report path
+            file_path = self.session_report_path
+            
+            # Before generating the report, initialize the tracking set by reading existing entries
+            self._initialize_report_tracking(file_path)
             
             # Generate the report at the specified location without asking for location
-            self.status_bar.showMessage("Generating report, please wait...")
+            self.status_bar.showMessage("Generating CSV report, please wait...")
             QApplication.processEvents()  # Process UI events to update status
             
             # Generate the report without user interaction
             success = self.generate_custom_report(file_path)
             
-            # Unlock UI after completion
-            if hasattr(self.control_panel, 'state_manager'):
-                self.control_panel.state_manager.transition('unlock_ui')
-            
+            # Show success message
             if success:
-                self.status_bar.showMessage(f"Report generated: {os.path.basename(file_path)}")
-                
-                # Notify the control panel that report generation is complete
+                self.status_bar.showMessage(f"CSV report saved to {file_path}", 5000)
                 if hasattr(self.control_panel, 'on_report_completed'):
-                    self.control_panel.on_report_completed(success=True, report_path=file_path)
-                
-                # Automatically open the report without asking
-                try:
-                    # Open file with default system application
-                    if os.path.exists(file_path):
-                        QDesktopServices.openUrl(QUrl.fromLocalFile(file_path))
-                        QMessageBox.information(
-                            self, "Report Generated",
-                            f"Report saved to:\n{file_path}"
-                        )
-                    else:
-                        QMessageBox.warning(
-                            self, "Report Generated",
-                            f"Report was generated but cannot be found at:\n{file_path}"
-                        )
-                except Exception as e:
-                    QMessageBox.information(
-                        self, "Report Generated",
-                        f"Report saved to:\n{file_path}\n\n(Unable to open automatically: {str(e)})"
-                    )
-                    import subprocess
-                    import sys
-                    if sys.platform == 'win32':
-                        os.startfile(file_path)
-                    elif sys.platform == 'darwin':  # macOS
-                        subprocess.call(['open', file_path])
-                    else:  # Linux
-                        subprocess.call(['xdg-open', file_path])
+                    self.control_panel.on_report_completed(success=True)
             else:
-                self.status_bar.showMessage("Failed to generate report")
-                QMessageBox.warning(self, "Report Error", "Failed to generate report")
-                # Notify the control panel that report generation failed
+                self.status_bar.showMessage("Failed to generate CSV report", 5000)
                 if hasattr(self.control_panel, 'on_report_completed'):
                     self.control_panel.on_report_completed(success=False)
         
-        except Exception as e:
-            self.status_bar.showMessage(f"Error generating report: {str(e)}")
-            QMessageBox.critical(self, "Report Error", f"Error generating report: {str(e)}")
-            
-            # Ensure UI is unlocked in case of error
+            # Unlock UI after completion
             if hasattr(self.control_panel, 'state_manager'):
                 self.control_panel.state_manager.transition('unlock_ui')
                 
-            # Notify the control panel about the error
+        except Exception as e:
+            self.status_bar.showMessage(f"Error generating CSV report: {str(e)}", 5000)
+            QMessageBox.warning(self, "Report Error", f"Failed to generate CSV report: {str(e)}")
             if hasattr(self.control_panel, 'on_report_completed'):
                 self.control_panel.on_report_completed(success=False)
+            if hasattr(self.control_panel, 'state_manager'):
+                self.control_panel.state_manager.transition('unlock_ui')
+                
+    def _initialize_report_tracking(self, file_path):
+        """
+        Initialize report tracking set by reading existing entries from a CSV file.
+        This prevents duplicating rows when appending to the same file.
+        
+        Args:
+            file_path: Path to the CSV file to read from.
+        """
+        # Create a fresh tracking set
+        self.report_data_tracked = set()
+        
+        # Check if the file exists
+        if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+            return  # Nothing to read, use empty tracking set
+            
+        try:
+            with open(file_path, 'r', newline='') as f:
+                reader = csv.reader(f)
+                # Skip header
+                headers = next(reader, None)
+                if not headers:
+                    return  # Empty file or no headers
+                    
+                # Read each row and add tracking keys
+                for row in reader:
+                    if len(row) >= 4:  # Need at least config, distance, ROI type, and angle
+                        config = row[0]
+                        distance_str = row[1]
+                        roi_label = row[2]
+                        # Create tracking key format that matches what's used in _generate_report_rows
+                        tracking_key = f"{config}_{distance_str}_{roi_label}"
+                        self.report_data_tracked.add(tracking_key)
+                        
+                        # Also add the "Outside ROI" context key if applicable
+                        if "ROI" in roi_label and "Outside" not in roi_label:
+                            context_label = "Primary" if "Primary" in roi_label else roi_label.replace(" ROI", "")
+                            outside_key = f"{config}_{distance_str}_Outside ROI_Context_{context_label}"
+                            self.report_data_tracked.add(outside_key)
+                            
+        except Exception as e:
+            print(f"Error initializing report tracking from file: {e}")
+            # On error, use a new empty tracking set (may cause some duplicates but won't crash)
     
     def _enhance_distance_band_metrics(self):
         """
@@ -1619,769 +1613,429 @@ class MainWindow(QMainWindow):
         </div>
         """
 
-    def generate_custom_report(self, file_path: str) -> bool:
+    def _calculate_roi_distance_bands(self, data, roi_prefix):
         """
-        Generate enhanced HTML report with better formatting and visualization.
+        Calculate distance band metrics for a specific ROI.
         
         Args:
-            file_path: Path where the report should be saved.
+            data: Data dictionary from processed_configs
+            roi_prefix: Prefix for the ROI type ('roi', 'roi2', 'roi3', 'outside_roi')
             
         Returns:
-            True if report generation was successful, False otherwise.
+            Tuple of (band_0_10, band_10_20, band_20_30) point counts
         """
-        if not self.analyzer or not self.analyzer.config_results:
-            return False
+        band_0_10 = 0
+        band_10_20 = 0
+        band_20_30 = 0
+        
+        # Check if we have the direct metrics available (preferred method)
+        if 'multi_frame_metrics' in data:
+            metrics = data['multi_frame_metrics']
             
+            # For outside ROI, use the total band counts if available (which include both inside and outside points)
+            if roi_prefix == 'outside_roi':
+                # Try using the total counts first (preferred)
+                if 'total_band_0_10m_count' in metrics:
+                    band_0_10 = metrics.get('total_band_0_10m_count', 0)
+                    band_10_20 = metrics.get('total_band_10_20m_count', 0)
+                    band_20_30 = metrics.get('total_band_20_30m_count', 0)
+                    
+                    # Return early if we have all the data
+                    if band_0_10 != 0 or band_10_20 != 0 or band_20_30 != 0:
+                        return band_0_10, band_10_20, band_20_30
+                
+                # Fallback to just outside counts if totals aren't available
+                band_0_10 = metrics.get('outside_roi_band_0_10m_count', 0)
+                band_10_20 = metrics.get('outside_roi_band_10_20m_count', 0)
+                band_20_30 = metrics.get('outside_roi_band_20_30m_count', 0)
+                
+                # Return early if we have all the data
+                if band_0_10 != 0 or band_10_20 != 0 or band_20_30 != 0:
+                    return band_0_10, band_10_20, band_20_30
+        
+        # If we don't have direct metrics or they're not for outside ROI, try the distance_bands data
+        if 'distance_bands' not in data:
+            return band_0_10, band_10_20, band_20_30
+        
+        # Get all band keys from the distance_bands (fallback method)
         try:
-            # Process UI events to keep the UI responsive during report generation
-            QApplication.processEvents()
+            # Assume band keys are in the format "min-maxm" (e.g., "0-10m") or similar
+            for band_key, band_data in data['distance_bands'].items():
+                # Clean up the band key to handle different formats
+                clean_key = band_key.replace('m', '').strip()
+                if '-' not in clean_key:
+                    continue  # Skip if not in expected format
+                
+                # Parse min and max distances
+                parts = clean_key.split('-')
+                if len(parts) != 2:
+                    continue
+                
+                try:
+                    min_dist = float(parts[0])
+                    max_dist = float(parts[1])
+                    
+                    # Get the count value from the band data
+                    if isinstance(band_data, dict):
+                        count = band_data.get('count', 0)
+                    else:
+                        # If it's not a dict, assume it's a numeric value representing count
+                        count = float(band_data)
+                    
+                    # Categorize the band based on distance range
+                    if min_dist < 10 and max_dist <= 10:
+                        # This is a 0-10m band (fully or partially)
+                        band_0_10 += count
+                    elif min_dist >= 10 and min_dist < 20 and max_dist <= 20:
+                        # This is a 10-20m band (fully or partially)
+                        band_10_20 += count
+                    elif min_dist >= 20 and min_dist < 30 and max_dist <= 30:
+                        # This is a 20-30m band (fully or partially)
+                        band_20_30 += count
+                    elif min_dist < 10 and max_dist > 10:
+                        # This spans the 0-10m and beyond bands, distribute proportionally
+                        # Simplified approach: assign based on the midpoint
+                        midpoint = (min_dist + max_dist) / 2
+                        if midpoint < 10:
+                            band_0_10 += count
+                        elif midpoint < 20:
+                            band_10_20 += count
+                        else:
+                            band_20_30 += count
+                    elif min_dist < 20 and max_dist > 20:
+                        # This spans the 10-20m and beyond bands, distribute proportionally
+                        # Simplified approach: assign based on the midpoint
+                        midpoint = (min_dist + max_dist) / 2
+                        if midpoint < 20:
+                            band_10_20 += count
+                        else:
+                            band_20_30 += count
+                except (ValueError, TypeError):
+                    # Skip if we can't parse the distances
+                    continue
+        except Exception as e:
+            # If anything goes wrong, return zeros
+            return 0, 0, 0
             
-            # Generate current timestamp
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        return band_0_10, band_10_20, band_20_30
+
+    def generate_custom_report(self, file_path: str) -> bool:
+        """
+        Generate or update a CSV report containing radar metrics for the current session.
+        Appends new data (not previously seen in this session) to the session file.
+
+        Args:
+            file_path: Path to save/update the CSV report for the session.
+
+        Returns:
+            bool: True if successful, False otherwise.
+        """
+        if not self.analyzer or not hasattr(self.analyzer, 'config_results'):
+            self.statusBar().showMessage("Analyzer or results not available.", 5000)
+            return False
+
+        try:
+            # Import necessary modules
+            import csv
+            import os
+            import math 
             
-            # Pre-process all data needed for the report to minimize UI freezing
-            processed_configs = {}
-            for config, distances in self.analyzer.config_results.items():
-                processed_configs[config] = {}
-                for distance, results in distances.items():
-                    # Pre-calculate all metrics to avoid performance bottlenecks
-                    points = results.get('circle_points', 0)
-                    avg_intensity = results.get('circle_avg_intensity', 0)
-                    circle_area = np.pi * self.analyzer.params.circle_radius**2
-                    density = points / circle_area if circle_area > 0 else 0
-                    
-                    # Store pre-calculated values
-                    processed_configs[config][distance] = {
-                        'points': points,
-                        'avg_intensity': avg_intensity,
-                        'density': density,
-                        'multi_frame_metrics': results.get('multi_frame_metrics', {})
-                    }
-                    
-                    # Process UI events periodically to keep the app responsive
-                    QApplication.processEvents()
+            # --- 1. File path validation and directory creation ---
+            # Ensure file_path has .csv extension
+            if not file_path.lower().endswith('.csv'):
+                file_path += '.csv'
+
+            # Create directory if it doesn't exist
+            dir_path = os.path.dirname(file_path)
+            if dir_path:  # Only if there's a directory part
+                try:
+                    os.makedirs(dir_path, exist_ok=True)
+                except PermissionError:
+                    self.statusBar().showMessage(f"Permission denied: Cannot create directory {dir_path}", 5000)
+                    return False
+                except Exception as e:
+                    self.statusBar().showMessage(f"Error creating directory for CSV file: {str(e)}", 5000)
+                    return False
+
+            # --- 2. Initialize tracking data if needed ---
+            if not hasattr(self, 'report_data_tracked'):
+                self.report_data_tracked = set()
+
+            # --- 3. File existence check ---
+            file_exists = os.path.exists(file_path)
+            needs_header = not file_exists or os.path.getsize(file_path) == 0
             
-            # Generate HTML content with enhanced styling
-            with open(file_path, 'w') as f:
-                html_content = f"""
-                <!DOCTYPE html>
-                <html lang="en">
-                <head>
-                    <title>Radar Experiment Comparison Report</title>
-                    <meta charset="UTF-8">
-                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                    <style>
-                        :root {{
-                            --primary-color: #2563eb;
-                            --primary-light: #3b82f6;
-                            --primary-dark: #1d4ed8;
-                            --secondary-color: #64748b;
-                            --accent-color: #f59e0b;
-                            --success-color: #10b981;
-                            --danger-color: #ef4444;
-                            --gray-100: #f1f5f9;
-                            --gray-200: #e2e8f0;
-                            --gray-300: #cbd5e1;
-                            --gray-800: #1e293b;
-                            --white: #ffffff;
-                        }}
-                        
-                        * {{
-                            box-sizing: border-box;
-                            margin: 0;
-                            padding: 0;
-                        }}
-                        
-                        body {{ 
-                            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif; 
-                            color: var(--gray-800);
-                            line-height: 1.6;
-                            background-color: #f8fafc;
-                            padding: 0;
-                            margin: 0;
-                        }}
-                        
-                        .container {{
-                            max-width: 1200px;
-                            margin: 0 auto;
-                            padding: 0 20px;
-                        }}
-                        
-                        h1, h2, h3, h4, h5, h6 {{ 
-                            color: var(--gray-800);
-                            margin-top: 1.5rem;
-                            margin-bottom: 1rem;
-                            font-weight: 600;
-                            line-height: 1.25;
-                        }}
-                        
-                        h1 {{ 
-                            font-size: 1.875rem;
-                            border-bottom: 2px solid var(--primary-color);
-                            padding-bottom: 0.5rem;
-                        }}
-                        
-                        h2 {{ 
-                            font-size: 1.5rem;
-                            border-bottom: 1px solid var(--primary-light);
-                            padding-bottom: 0.25rem;
-                        }}
-                        
-                        h3 {{
-                            font-size: 1.25rem;
-                        }}
-                        
-                        .timestamp {{ 
-                            color: var(--secondary-color);
-                            font-style: italic;
-                            margin-bottom: 2rem;
-                        }}
-                        
-                        .header {{
-                            background-color: var(--white);
-                            padding: 2rem 0;
-                            border-bottom: 1px solid var(--gray-200);
-                            margin-bottom: 2rem;
-                            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-                        }}
-                        
-                        table {{ 
-                            border-collapse: collapse; 
-                            width: 100%; 
-                            margin: 1.5rem 0;
-                            box-shadow: 0 1px 3px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.24);
-                            background-color: var(--white);
-                            border-radius: 0.5rem;
-                            overflow: hidden;
-                        }}
-                        
-                        th, td {{ 
-                            padding: 1rem 0.75rem; 
-                            text-align: left; 
-                        }}
-                        
-                        th {{ 
-                            background-color: var(--primary-color); 
-                            color: var(--white);
-                            font-weight: 600;
-                            position: sticky;
-                            top: 0;
-                        }}
-                        
-                        tr:nth-child(even) {{ 
-                            background-color: var(--gray-100); 
-                        }}
-                        
-                        tr:hover {{
-                            background-color: #dbeafe;
-                        }}
-                        
-                        .data-card {{
-                            background-color: var(--white);
-                            border-radius: 0.5rem;
-                            box-shadow: 0 1px 3px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.24);
-                            margin-bottom: 1.5rem;
-                            overflow: hidden;
-                        }}
-                        
-                        .card-header {{
-                            background-color: var(--primary-color);
-                            color: var(--white);
-                            padding: 1rem;
-                            font-weight: 600;
-                            font-size: 1.25rem;
-                            display: flex;
-                            justify-content: space-between;
-                            align-items: center;
-                        }}
-                        
-                        .card-body {{
-                            padding: 1.5rem;
-                        }}
-                        
-                        .card-title {{
-                            font-size: 1.25rem;
-                            font-weight: 600;
-                            margin-bottom: 1rem;
-                            color: var(--primary-dark);
-                        }}
-                        
-                        .metrics-grid {{
-                            display: grid;
-                            grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-                            gap: 1rem;
-                            margin: 1rem 0;
-                        }}
-                        
-                        .metric {{
-                            background-color: var(--gray-100);
-                            padding: 1rem;
-                            border-radius: 0.375rem;
-                            border-left: 3px solid var(--primary-color);
-                            transition: transform 0.2s ease-in-out;
-                        }}
-                        
-                        .metric:hover {{
-                            transform: translateY(-2px);
-                            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-                        }}
-                        
-                        .metric-label {{
-                            font-weight: 500;
-                            color: var(--secondary-color);
-                            margin-bottom: 0.25rem;
-                            font-size: 0.875rem;
-                        }}
-                        
-                        .metric-value {{
-                            font-size: 1.5rem;
-                            font-weight: 600;
-                            color: var(--gray-800);
-                        }}
-                        
-                        .metric-units {{
-                            font-size: 0.75rem;
-                            color: var(--secondary-color);
-                            margin-left: 0.25rem;
-                        }}
-                        
-                        .section {{
-                            margin-bottom: 3rem;
-                        }}
-                        
-                        .section-title {{
-                            display: flex;
-                            align-items: center;
-                            margin-bottom: 1rem;
-                        }}
-                        
-                        .section-title::before {{
-                            content: "";
-                            width: 4px;
-                            height: 1.5rem;
-                            background-color: var(--primary-color);
-                            margin-right: 0.5rem;
-                            border-radius: 2px;
-                        }}
-                        
-                        .tabs {{
-                            display: flex;
-                            border-bottom: 1px solid var(--gray-300);
-                            margin-bottom: 1rem;
-                        }}
-                        
-                        .tab {{
-                            padding: 0.75rem 1rem;
-                            font-weight: 500;
-                            cursor: pointer;
-                            border-bottom: 2px solid transparent;
-                            transition: all 0.2s ease-in-out;
-                        }}
-                        
-                        .tab.active {{
-                            border-bottom: 2px solid var(--primary-color);
-                            color: var(--primary-color);
-                        }}
-                        
-                        .tab:hover {{
-                            color: var(--primary-color);
-                        }}
-                        
-                        .tab-content {{
-                            display: none;
-                        }}
-                        
-                        .tab-content.active {{
-                            display: block;
-                        }}
-                        
-                        .highlight {{
-                            background-color: #fef3c7 !important;
-                            font-weight: 600;
-                        }}
-                        
-                        .header-row {{
-                            background-color: #dbeafe !important;
-                        }}
-                        
-                        footer {{
-                            background-color: var(--gray-800);
-                            color: var(--white);
-                            padding: 2rem 0;
-                            margin-top: 3rem;
-                            text-align: center;
-                        }}
-                        
-                        @media (max-width: 768px) {{
-                            .metrics-grid {{
-                                grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-                            }}
-                            
-                            .metric-value {{
-                                font-size: 1.25rem;
-                            }}
-                            
-                            table {{
-                                display: block;
-                                overflow-x: auto;
-                            }}
-                        }}
-                        
-                        /* Add basic JavaScript interaction for tabs */
-                        .js-tabs {{
-                            margin-top: 1rem;
-                        }}
-                    </style>
-                    <script>
-                        document.addEventListener('DOMContentLoaded', function() {{
-                            // Tab functionality
-                            const tabs = document.querySelectorAll('.tab');
-                            tabs.forEach(tab => {{
-                                tab.addEventListener('click', function() {{
-                                    // Remove active class from all tabs
-                                    tabs.forEach(t => t.classList.remove('active'));
-                                    
-                                    // Add active class to clicked tab
-                                    this.classList.add('active');
-                                    
-                                    // Hide all tab content
-                                    const tabContents = document.querySelectorAll('.tab-content');
-                                    tabContents.forEach(content => content.classList.remove('active'));
-                                    
-                                    // Show selected tab content
-                                    const targetContent = document.getElementById(this.dataset.target);
-                                    if (targetContent) {{
-                                        targetContent.classList.add('active');
-                                    }}
-                                }});
-                            }});
-                            
-                            // Activate first tab by default
-                            const firstTab = document.querySelector('.tab');
-                            if (firstTab) {{
-                                firstTab.click();
-                            }}
-                        }});
-                    </script>
-                </head>
-                <body>
-                    <div class="header">
-                        <div class="container">
-                            <h1>Radar Experiment Comparison Report</h1>
-                            <p class="timestamp">Generated on: {timestamp}</p>
-                        </div>
-                    </div>
-                    
-                    <div class="container">
-                """
-                
-                f.write(html_content)
+            # --- 4. CSV Header definition ---
+            header_row = [
+                'Config', 'Target_Distance', 'ROI_Type', 'Angle_Degrees',
+                'Total_Points_All_Frames', 'Avg_Points_Per_Frame',
+                'SNR_dB', 'Min_Intensity', 'Max_Intensity', 'Avg_Intensity',
+                'Total_0_10m_Points', 'Total_10_20m_Points', 'Total_20_30m_Points'
+            ]
 
-                # Summary section
-                summary_html = """
-                    <div class="section">
-                        <div class="section-title">
-                            <h2>Configuration Summary</h2>
-                        </div>
-                        <div class="data-card">
-                            <div class="card-body">
-                                <table>
-                                    <thead>
-                                        <tr class="header-row">
-                                            <th>Configuration</th>
-                                            <th>Target Distance</th>
-                                            <th>Total Points</th>
-                                            <th>10-Frame Avg</th>
-                                            <th>Point Density</th>
-                                            <th>Avg. Intensity</th>
-                                            <th>ROI Type</th>
-                                            <th>Points</th>
-                                            <th>Avg Pts/Frame</th>
-                                            <th>Density</th>
-                                            <th>SNR</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                """
-                
-                f.write(summary_html)
+            # --- 5. Data preprocessing ---
+            processed_configs = self._preprocess_report_data()
+            
+            # --- 6. Generate rows to append ---
+            rows_to_append = []
+            if needs_header:
+                rows_to_append.append(header_row)
+            
+            new_rows_added_count = self._generate_report_rows(processed_configs, rows_to_append)
+            
+            # --- 7. Write to file only if we have data to write ---
+            if needs_header or new_rows_added_count > 0:
+                try:
+                    # Write in a single operation
+                    if self._write_csv_rows(file_path, rows_to_append):
+                        # Success message
+                        if needs_header:
+                            status_message = f"Report created: {new_rows_added_count} rows added to {os.path.basename(file_path)}"
+                        else:
+                            status_message = f"Report updated: {new_rows_added_count} new rows added to {os.path.basename(file_path)}"
+                        self.statusBar().showMessage(status_message, 5000)
+                    else:
+                        return False  # _write_csv_rows already showed error message
+                except Exception as write_error:
+                    self.statusBar().showMessage(f"Error writing to CSV file: {str(write_error)}", 5000)
+                    return False
+            else:
+                self.statusBar().showMessage("No new data to add to the report.", 5000)
 
-                # Use pre-processed data to generate the table rows more efficiently
-                table_rows = []
-                for config, distances in processed_configs.items():
-                    for distance, data in distances.items():
-                        multi_frame_metrics = data['multi_frame_metrics']
-                        
-                        # Get inside ROI metrics
-                        roi_points = multi_frame_metrics.get('roi_combined_point_count', 0)
-                        roi_spatial_density = multi_frame_metrics.get('roi_spatial_density', 0)
-                        roi_snr = multi_frame_metrics.get('roi_snr_db', 0)
-                        
-                        # Primary ROI row
-                        roi_avg_points = multi_frame_metrics.get('roi_avg_single_frame_count', 0)
-                        
-                        # Calculate correct total points (sum of inside and outside ROI)
-                        outside_points = multi_frame_metrics.get('outside_roi_combined_point_count', 0)
-                        total_points = roi_points + outside_points
-                        
-                        # Calculate correct 10-frame average
-                        outside_avg = multi_frame_metrics.get('outside_roi_avg_single_frame_count', 0)
-                        ten_frame_avg = roi_avg_points + outside_avg
-                        
-                        table_rows.append(f"""
-                            <tr>
-                                <td rowspan="{1 + len([c for c in self.analyzer.params.circles[1:] if c.enabled]) + 1}">{config}</td>
-                                <td rowspan="{1 + len([c for c in self.analyzer.params.circles[1:] if c.enabled]) + 1}">{distance}m</td>
-                                <td rowspan="{1 + len([c for c in self.analyzer.params.circles[1:] if c.enabled]) + 1}">{total_points}</td>
-                                <td rowspan="{1 + len([c for c in self.analyzer.params.circles[1:] if c.enabled]) + 1}">{ten_frame_avg:.1f}</td>
-                                <td rowspan="{1 + len([c for c in self.analyzer.params.circles[1:] if c.enabled]) + 1}">{data['density']:.3f} pts/m²</td>
-                                <td rowspan="{1 + len([c for c in self.analyzer.params.circles[1:] if c.enabled]) + 1}">{data['avg_intensity']:.3f}</td>
-                                <td>Primary ROI</td>
-                                <td>{roi_points}</td>
-                                <td>{roi_avg_points:.1f}</td>
-                                <td>{roi_spatial_density:.2f}</td>
-                                <td>{roi_snr:.2f}</td>
-                            </tr>
-                        """)
-                        
-                        # Secondary ROI rows
-                        for i in range(1, 3):  # Add rows for secondary circles
-                            if i < len(self.analyzer.params.circles) and self.analyzer.params.circles[i].enabled:
-                                prefix = f'roi{i+1}'
-                                sec_points = multi_frame_metrics.get(f'{prefix}_combined_point_count', 0)
-                                sec_avg_points = multi_frame_metrics.get(f'{prefix}_avg_single_frame_count', 0)
-                                sec_density = multi_frame_metrics.get(f'{prefix}_spatial_density', 0)
-                                sec_snr = multi_frame_metrics.get(f'{prefix}_snr_db', 0)
-                                table_rows.append(f"""
-                                    <tr>
-                                        <td>{self.analyzer.params.circles[i].label} ROI</td>
-                                        <td>{sec_points}</td>
-                                        <td>{sec_avg_points:.1f}</td>
-                                        <td>{sec_density:.2f}</td>
-                                        <td>{sec_snr:.2f}</td>
-                                    </tr>
-                                """)
-                        
-                        # Outside ROI row
-                        outside_avg_points = multi_frame_metrics.get('outside_roi_avg_single_frame_count', 0)
-                        table_rows.append(f"""
-                            <tr>
-                                <td>Outside ROI</td>
-                                <td>{multi_frame_metrics.get('outside_roi_combined_point_count', 0)}</td>
-                                <td>{outside_avg_points:.1f}</td>
-                                <td>{multi_frame_metrics.get('outside_roi_spatial_density', 0):.2f}</td>
-                                <td>{multi_frame_metrics.get('outside_roi_snr_db', 0):.2f}</td>
-                            </tr>
-                        """)
-                        
-                        # Process UI events periodically during HTML generation
-                        QApplication.processEvents()
-                        
-                # Write all table rows at once for better performance
-                f.write(''.join(table_rows))
-
-                # End of summary section
-                f.write("""
-                                    </tbody>
-                                </table>
-                            </div>
-                        </div>
-                    </div>
-                """)
-
-                # Detailed results - build all HTML in memory first then write at once
-                f.write("""
-                    <div class="section">
-                        <div class="section-title">
-                            <h2>Detailed Results</h2>
-                        </div>
-                """)
-                
-                # Pre-build all detailed results sections
-                all_details = []
-                
-                for config, distances in processed_configs.items():
-                    # Process UI events to keep app responsive
-                    QApplication.processEvents()
-                    
-                    section_html = [f"""
-                        <div class="data-card">
-                            <div class="card-header">
-                                Configuration: {config}
-                            </div>
-                            <div class="card-body">
-                    """]
-                    
-                    # Add tabs for each distance
-                    section_html.append('<div class="js-tabs">')
-                    section_html.append('<div class="tabs">')
-                    
-                    # Generate tab buttons
-                    for i, (distance, _) in enumerate(distances.items()):
-                        active_class = 'active' if i == 0 else ''
-                        section_html.append(f"""
-                            <div class="tab {active_class}" data-target="tab-{config}-{distance}">
-                                {distance}m
-                            </div>
-                        """)
-                    
-                    section_html.append('</div>') # End tabs
-                    
-                    # Generate tab content
-                    for distance, data in distances.items():
-                        # Process UI events periodically
-                        QApplication.processEvents()
-                        
-                        # Get original results for fields not pre-processed
-                        results = self.analyzer.config_results[config][distance]
-                        
-                        # Calculate correct total points and averages
-                        roi_points = data['multi_frame_metrics'].get('roi_combined_point_count', 0)
-                        outside_points = data['multi_frame_metrics'].get('outside_roi_combined_point_count', 0)
-                        total_points = roi_points + outside_points
-                        
-                        roi_avg = data['multi_frame_metrics'].get('roi_avg_single_frame_count', 0)
-                        outside_avg = data['multi_frame_metrics'].get('outside_roi_avg_single_frame_count', 0)
-                        ten_frame_avg = roi_avg + outside_avg
-                        
-                        section_html.append(f"""
-                            <div id="tab-{config}-{distance}" class="tab-content">
-                                <h3 class="card-title">Target Distance: {distance}m</h3>
-                                
-                                <div class="metrics-grid">
-                                    <div class="metric">
-                                        <div class="metric-label">Total Points</div>
-                                        <div class="metric-value">{total_points}</div>
-                                    </div>
-                                    
-                                    <div class="metric">
-                                        <div class="metric-label">10-Frame Average Points</div>
-                                        <div class="metric-value">{ten_frame_avg:.1f}</div>
-                                    </div>
-                                    
-                                    <div class="metric">
-                                        <div class="metric-label">Average Intensity</div>
-                                        <div class="metric-value">{results.get('avg_intensity', 0):.3f}</div>
-                                    </div>
-                                    
-                                    <div class="metric">
-                                        <div class="metric-label">Points in Target Band</div>
-                                        <div class="metric-value">{results.get('target_band_points', 0)}</div>
-                                    </div>
-                                </div>
-
-                                <h4 class="card-title">10-Frame Average Metrics</h4>
-                                <div class="metrics-grid">
-                                    <div class="metric">
-                                        <div class="metric-label">Combined Points</div>
-                                        <div class="metric-value">{data['multi_frame_metrics'].get('combined_point_count', 0)}</div>
-                                    </div>
-                                    
-                                    <div class="metric">
-                                        <div class="metric-label">Avg Points/Frame</div>
-                                        <div class="metric-value">{data['multi_frame_metrics'].get('avg_single_frame_count', 0):.1f}</div>
-                                    </div>
-                                    
-                                    <div class="metric">
-                                        <div class="metric-label">Density Improvement</div>
-                                        <div class="metric-value">{data['multi_frame_metrics'].get('point_density_improvement', 0):.2f}<span class="metric-units">x</span></div>
-                                    </div>
-                                    
-                                    <div class="metric">
-                                        <div class="metric-label">Avg Intensity</div>
-                                        <div class="metric-value">{data['multi_frame_metrics'].get('combined_avg_intensity', 0):.2f}</div>
-                                    </div>
-                                    
-                                    <div class="metric">
-                                        <div class="metric-label">Max Intensity</div>
-                                        <div class="metric-value">{data['multi_frame_metrics'].get('combined_max_intensity', 0):.2f}</div>
-                                    </div>
-                                    
-                                    <div class="metric">
-                                        <div class="metric-label">Stability Score</div>
-                                        <div class="metric-value">{data['multi_frame_metrics'].get('ten_frame_stability', 0):.2f}</div>
-                                    </div>
-                                </div>
-                                
-                                <h4 class="card-title">Primary ROI Circle Metrics</h4>
-                                <div class="metrics-grid">
-                                    <div class="metric">
-                                        <div class="metric-label">Combined Points</div>
-                                        <div class="metric-value">{data['multi_frame_metrics'].get('roi_combined_point_count', 0)}</div>
-                                    </div>
-                                    
-                                    <div class="metric">
-                                        <div class="metric-label">Avg Points/Frame</div>
-                                        <div class="metric-value">{data['multi_frame_metrics'].get('roi_avg_single_frame_count', 0):.1f}</div>
-                                    </div>
-                                    
-                                    <div class="metric">
-                                        <div class="metric-label">Spatial Density</div>
-                                        <div class="metric-value">{data['multi_frame_metrics'].get('roi_spatial_density', 0):.2f}<span class="metric-units">pts/m²</span></div>
-                                    </div>
-                                    
-                                    <div class="metric">
-                                        <div class="metric-label">Density Gain</div>
-                                        <div class="metric-value">{data['multi_frame_metrics'].get('roi_density_gain_db', 0):.2f}<span class="metric-units">dB</span></div>
-                                    </div>
-                                    
-                                    <div class="metric">
-                                        <div class="metric-label">SNR</div>
-                                        <div class="metric-value">{data['multi_frame_metrics'].get('roi_snr_db', 0):.2f}<span class="metric-units">dB</span></div>
-                                    </div>
-                                    
-                                    <div class="metric">
-                                        <div class="metric-label">Intensity Range</div>
-                                        <div class="metric-value">{data['multi_frame_metrics'].get('roi_combined_min_intensity', 0):.1f} - {data['multi_frame_metrics'].get('roi_combined_max_intensity', 0):.1f}</div>
-                                    </div>
-                                    
-                                    <div class="metric">
-                                        <div class="metric-label">Point Separation</div>
-                                        <div class="metric-value">{data['multi_frame_metrics'].get('roi_mean_point_separation', 0):.3f}<span class="metric-units">m</span></div>
-                                    </div>
-                                    
-                                    <div class="metric">
-                                        <div class="metric-label">Spatial Uniformity</div>
-                                        <div class="metric-value">{data['multi_frame_metrics'].get('roi_spatial_uniformity', 0):.3f}</div>
-                                    </div>
-                                </div>
-                                
-                                <!-- Secondary ROI metrics -->
-                                {self._generate_secondary_roi_metrics_html(data['multi_frame_metrics'], 1, self.analyzer.params.circles)}
-                                {self._generate_secondary_roi_metrics_html(data['multi_frame_metrics'], 2, self.analyzer.params.circles)}
-                                
-                                <!-- Outside ROI metrics (in a collapsible section) -->
-                                <h4 class="card-title">Outside ROI Metrics</h4>
-                                <div class="metrics-grid">
-                                    <div class="metric">
-                                        <div class="metric-label">Total Points</div>
-                                        <div class="metric-value">{data['multi_frame_metrics'].get('outside_roi_combined_point_count', 0)}</div>
-                                    </div>
-                                    
-                                    <div class="metric">
-                                        <div class="metric-label">Avg Points/Frame</div>
-                                        <div class="metric-value">{data['multi_frame_metrics'].get('outside_roi_avg_single_frame_count', 0):.1f}</div>
-                                    </div>
-                                    
-                                    <div class="metric">
-                                        <div class="metric-label">Spatial Density</div>
-                                        <div class="metric-value">{data['multi_frame_metrics'].get('outside_roi_spatial_density', 0):.2f}<span class="metric-units">pts/m²</span></div>
-                                    </div>
-                                    
-                                    <div class="metric">
-                                        <div class="metric-label">SNR</div>
-                                        <div class="metric-value">{data['multi_frame_metrics'].get('outside_roi_snr_db', 0):.2f}<span class="metric-units">dB</span></div>
-                                    </div>
-                                </div>
-
-                                <h4 class="card-title">Distance Band Analysis</h4>
-                                <table class="data-table">
-                                    <thead>
-                                        <tr>
-                                            <th>Distance Band</th>
-                                            <th>Points</th>
-                                            <th>Average Intensity</th>
-                                            <th>Point Density (pts/m³)</th>
-                                            <th>Intensity SNR</th>
-                                            <th>Temporal Consistency</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                        """)
-                        
-                        band_rows = []
-                        
-                        # Get distance bands from results - fix the undefined variable issue
-                        distance_bands = results.get('distance_bands', {})
-                        
-                        for band, band_data in distance_bands.items():
-                            highlight = 'class="highlight"' if band == results.get('target_band', '') else ''
-                            
-                            # Handle both dictionary and scalar formats
-                            if isinstance(band_data, dict):
-                                count = band_data.get('count', 0)
-                                avg_intensity = band_data.get('avg_intensity', 0.0)
-                                # Extract new metrics if available, with defaults if not
-                                point_density = band_data.get('point_density', 0.0)
-                                intensity_snr = band_data.get('intensity_snr', 0.0)
-                                temporal_consistency = band_data.get('temporal_consistency', 0.0)
-                            else:
-                                # Handle case where band_data is just a count (old format)
-                                count = float(band_data)
-                                avg_intensity = 0.0
-                                point_density = 0.0
-                                intensity_snr = 0.0
-                                temporal_consistency = 0.0
-                            
-                            # Format temporal consistency as percentage for better readability
-                            temporal_consistency_pct = temporal_consistency * 100
-                            
-                            band_rows.append(f"""
-                                <tr {highlight}>
-                                    <td>{band}</td>
-                                    <td>{count:.0f}</td>
-                                    <td>{avg_intensity:.3f}</td>
-                                    <td>{point_density:.6f}</td>
-                                    <td>{intensity_snr:.2f}</td>
-                                    <td>{temporal_consistency_pct:.1f}%</td>
-                                </tr>
-                            """)
-                        
-                        # Append all band rows at once
-                        section_html.append(''.join(band_rows))
-                        section_html.append("""
-                                    </tbody>
-                                </table>
-                            </div>
-                        """)
-                    
-                    # Complete this configuration section
-                    section_html.append("</div>") # End js-tabs
-                    section_html.append("</div>") # End card-body
-                    section_html.append("</div>") # End data-card
-                    
-                    # Add this completed section to all details
-                    all_details.append(''.join(section_html))
-
-                # Write all sections at once
-                f.write(''.join(all_details))
-                
-                # Close the details section
-                f.write("</div>")
-                
-                # Add summary statistics and footer
-                footer_html = f"""
-                    <div class="section">
-                        <div class="section-title">
-                            <h2>Report Summary</h2>
-                        </div>
-                        <div class="data-card">
-                            <div class="card-body">
-                                <p>This report contains data for {len(processed_configs)} radar configurations and 
-                                {sum(len(distances) for distances in processed_configs.values())} distance measurements.</p>
-                                <p>Data was processed using multi-frame analysis over 10 frames to provide enhanced statistics.</p>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <footer>
-                        <div class="container">
-                            <p>AWR Radar Analyzer &copy; {datetime.now().year}</p>
-                        </div>
-                    </footer>
-                </div>
-                </body>
-                </html>
-                """
-                
-                f.write(footer_html)
-
-            self.statusBar().showMessage(f"Report saved to {file_path}", 5000)
             return True
-            
+
         except Exception as e:
             self.statusBar().showMessage(f"Error generating report: {str(e)}", 5000)
+            import traceback
+            traceback.print_exc()  # Print detailed error for debugging
             return False
+    
+    def _preprocess_report_data(self):
+        """
+        Preprocess the analyzer data for the report.
+        
+        Returns:
+            dict: Processed configuration data.
+        """
+        processed_configs = {}
+        for config, distances in self.analyzer.config_results.items():
+            processed_configs[config] = {}
+            for distance, results in distances.items():
+                if 'multi_frame_metrics' in results:
+                    processed_configs[config][distance] = {
+                        'multi_frame_metrics': results.get('multi_frame_metrics', {}),
+                        'density': results.get('point_density', 0.0),
+                        'avg_intensity': results.get('avg_intensity', 0.0),
+                        'distance_bands': results.get('distance_bands', {})
+                    }
+        return processed_configs
+    
+    def _create_report_row(self, config, distance_str, roi_label, angle_str, metrics, 
+                           metric_prefix, is_outside_roi=False, outside_bands=None):
+        """Helper function to create a single formatted row for the CSV report."""
+        if is_outside_roi:
+            point_count = metrics.get(f'{metric_prefix}_combined_point_count', 0)
+            band_0_10, band_10_20, band_20_30 = outside_bands if outside_bands else (0, 0, 0)
+            return [
+                config, distance_str, roi_label, angle_str, int(point_count),
+                self._safe_float_format(metrics.get(f'{metric_prefix}_avg_single_frame_count'), 1), 
+                self._safe_float_format(metrics.get(f'{metric_prefix}_snr_db'), 2),
+                self._safe_float_format(metrics.get(f'{metric_prefix}_min_intensity'), 1), 
+                self._safe_float_format(metrics.get(f'{metric_prefix}_max_intensity'), 1),
+                self._safe_float_format(metrics.get(f'{metric_prefix}_avg_intensity'), 1), 
+                int(band_0_10), int(band_10_20), int(band_20_30)
+            ]
+        else:
+            point_count = metrics.get(f'{metric_prefix}_combined_point_count', 0)
+            return [
+                config, distance_str, roi_label, angle_str,
+                int(point_count),
+                self._safe_float_format(metrics.get(f'{metric_prefix}_avg_single_frame_count'), 1), 
+                self._safe_float_format(metrics.get(f'{metric_prefix}_snr_db'), 2),
+                self._safe_float_format(metrics.get(f'{metric_prefix}_combined_min_intensity'), 1), 
+                self._safe_float_format(metrics.get(f'{metric_prefix}_combined_max_intensity'), 1),
+                self._safe_float_format(metrics.get(f'{metric_prefix}_combined_avg_intensity'), 1), 
+                "", "", "" # No bands for specific ROIs
+            ]
+            
+    def _generate_report_rows(self, processed_configs, rows_to_append):
+        """
+        Generate rows for the CSV report based on processed data.
+        Iterates through all ROI circles, adding specific ROI rows and 
+        corresponding 'Outside ROI' context rows.
+        
+        Args:
+            processed_configs (dict): Preprocessed configuration data.
+            rows_to_append (list): List to append rows to.
+            
+        Returns:
+            int: Count of new rows added.
+        """
+        new_rows_added_count = 0
+        
+        for config, distances in processed_configs.items():
+            for distance, data in distances.items():
+                multi_frame_metrics = data['multi_frame_metrics']
+                distance_str = f"{distance}m"
+
+                # --- Calculate Outside ROI metrics once per config/distance ---
+                outside_roi_points = multi_frame_metrics.get('outside_roi_combined_point_count', 0)
+                outside_band_0_10, outside_band_10_20, outside_band_20_30 = \
+                    self._calculate_roi_distance_bands(data, 'outside_roi')
+                outside_bands_tuple = (outside_band_0_10, outside_band_10_20, outside_band_20_30)
+
+                # --- Loop through ALL configured circles (Primary + Secondary) ---
+                for i, circle in enumerate(self.analyzer.params.circles):
+                    if not circle.enabled:
+                        continue # Skip disabled circles
+                        
+                    # Determine ROI specifics
+                    is_primary = (i == 0)
+                    roi_prefix = 'roi' if is_primary else f'roi{i+1}'
+                    roi_label = "Primary ROI" if is_primary else getattr(circle, 'label', f"Secondary {i}") + " ROI"
+                    angle_str = "0" if is_primary else self._safe_float_format(getattr(circle, 'angle', 0), 1)
+                    
+                    # --- Add Specific ROI Row (if not tracked) ---
+                    specific_roi_key = f"{config}_{distance_str}_{roi_label}"
+                    if specific_roi_key not in self.report_data_tracked:
+                        self.report_data_tracked.add(specific_roi_key)
+                        
+                        # Create and append the specific ROI row
+                        roi_row = self._create_report_row(
+                            config, distance_str, roi_label, angle_str, 
+                            multi_frame_metrics, roi_prefix, is_outside_roi=False
+                        )
+                        rows_to_append.append(roi_row)
+                        new_rows_added_count += 1
+
+                        # --- Add Corresponding Outside ROI Row (if not tracked for this context) ---
+                        outside_context_label = "Primary" if is_primary else getattr(circle, 'label', f"Secondary_{i}")
+                        outside_key_context = f"{config}_{distance_str}_Outside ROI_Context_{outside_context_label}"
+                        if outside_key_context not in self.report_data_tracked:
+                            self.report_data_tracked.add(outside_key_context)
+                            
+                            # Create and append the Outside ROI row for this context
+                            outside_row = self._create_report_row(
+                                config, distance_str, "Outside ROI", "N/A",
+                                multi_frame_metrics, 'outside_roi', 
+                                is_outside_roi=True, outside_bands=outside_bands_tuple
+                            )
+                            rows_to_append.append(outside_row)
+                            new_rows_added_count += 1
+                            
+        return new_rows_added_count
+    
+    def _write_csv_rows(self, file_path, rows):
+        """
+        Write rows to a CSV file in append mode.
+        
+        Args:
+            file_path: Path to the CSV file.
+            rows: Rows to write.
+            
+        Returns:
+            bool: True if successful, False otherwise.
+        """
+        try:
+            with open(file_path, 'a', newline='') as f:  # Use 'a' (append) mode to add to existing file
+                writer = csv.writer(f, dialect='excel', lineterminator='\n')
+                writer.writerows(rows)
+            return True
+        except PermissionError:
+            self.statusBar().showMessage(f"Permission denied: Cannot write to {file_path}", 5000)
+            return False
+        except IOError as e:
+            self.statusBar().showMessage(f"I/O error writing CSV file: {str(e)}", 5000)
+            return False
+        except Exception as e:
+            self.statusBar().showMessage(f"Error writing to CSV file: {str(e)}", 5000)
+            return False
+    
+    def _safe_float_format(self, value, decimal_places=1):
+        """
+        Safely format a value as a float with specified decimal places.
+        
+        Args:
+            value: Value to format.
+            decimal_places (int): Number of decimal places.
+            
+        Returns:
+            str: Formatted float string.
+        """
+        try:
+            if value is None:
+                return f"0.{'0' * decimal_places}"
+            f_value = float(value)
+            if not math.isfinite(f_value):
+                return f"0.{'0' * decimal_places}"  # Represent non-finite as zero
+            return f"{f_value:.{decimal_places}f}"
+        except (TypeError, ValueError):
+            return f"0.{'0' * decimal_places}"  # Default value
+    
+    def _validate_csv_file(self, file_path: str) -> None:
+        """
+        Validate a CSV file to ensure it's properly formatted.
+        
+        Args:
+            file_path: Path to the CSV file to validate.
+        """
+        try:
+            import csv
+            import os
+            
+            # Check if the file exists and has content
+            if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+                self.statusBar().showMessage(f"Warning: CSV file {file_path} is empty or doesn't exist", 5000)
+                return
+                
+            # Read the CSV file to verify its structure
+            with open(file_path, 'r', newline='') as f:
+                reader = csv.reader(f)
+                rows = list(reader)
+                
+                # Check if we have at least a header row
+                if len(rows) < 1:
+                    self.statusBar().showMessage(f"Warning: CSV file {file_path} has no rows", 5000)
+                    return
+                    
+                # Check if the header has the expected number of columns
+                expected_columns = 13  # Based on the CSV structure
+                if len(rows[0]) != expected_columns:
+                    self.statusBar().showMessage(
+                        f"Warning: CSV header has {len(rows[0])} columns, expected {expected_columns}", 5000
+                    )
+                    
+                # Check if data rows have the same number of columns as the header
+                for i, row in enumerate(rows[1:], 1):
+                    if len(row) != expected_columns:
+                        self.statusBar().showMessage(
+                            f"Warning: Row {i} has {len(row)} columns, expected {expected_columns}", 5000
+                        )
+                        break
+                
+                # Check for empty or problematic fields in numerical columns
+                numerical_columns = [4, 5, 6, 7, 8, 9]  # Indices of columns that should contain numbers
+                for i, row in enumerate(rows[1:], 1):
+                    if len(row) != expected_columns:
+                        continue  # Skip rows with incorrect column count
+                    
+                    for col_idx in numerical_columns:
+                        if col_idx < len(row):
+                            value = row[col_idx]
+                            # Check if it's a valid number
+                            try:
+                                float(value)
+                            except ValueError:
+                                self.statusBar().showMessage(
+                                    f"Warning: Row {i}, column {col_idx+1} has non-numeric value: '{value}'", 5000
+                                )
+                                break
+                
+                # If we get here, the CSV is likely well-formed
+                self.statusBar().showMessage(f"CSV validation successful: {len(rows)} rows, {expected_columns} columns", 3000)
+                
+        except Exception as e:
+            self.statusBar().showMessage(f"Error validating CSV file: {str(e)}", 5000)
     
     def show_about_dialog(self):
         """Show the about dialog."""
@@ -2454,15 +2108,9 @@ class MainWindow(QMainWindow):
     @pyqtSlot()
     def stop_rosbag(self):
         """Stop ROS2 bag playback or recording."""
-        if self.analyzer is None:
-            return
-        
-        try:
-            # Call analyzer method to stop bag operations
+        if self.analyzer is not None:
             self.analyzer.stop_rosbag()
             self.status_bar.showMessage("Stopped ROS2 bag playback/recording")
-        except Exception as e:
-            QMessageBox.critical(self, "Stop Error", f"Failed to stop ROS2 bag: {str(e)}")
     
     @pyqtSlot(float)
     def seek_rosbag(self, position):
@@ -2487,60 +2135,12 @@ class MainWindow(QMainWindow):
     
     @pyqtSlot(float)
     def update_playback_position(self, position):
-        """Update the timeline slider position during bag playback.
-        
-        This method is called from the analyzer's update_playback_position_signal
-        to update the UI timeline as the bag plays.
-        
-        Args:
-            position: Normalized position in the bag (0.0-1.0)
-        """
-        try:
-            if hasattr(self, 'control_panel') and hasattr(self.control_panel, 'timeline_slider'):
-                # Check if the user is currently dragging the slider
-                if not getattr(self.control_panel, 'timeline_dragging', False):
-                    # Store the last position and current time if not already set
-                    if not hasattr(self, '_last_position'):
-                        self._last_position = 0.0
-                        self._last_position_time = time.time()
-                        self._target_position = position
-                    else:
-                        # Store the target position for smoother updates
-                        self._target_position = position
-                    
-                    # Calculate elapsed time since last update
-                    current_time = time.time()
-                    elapsed = current_time - self._last_position_time
-                    
-                    # Update at 60fps for smoother appearance (twice the previous rate)
-                    if elapsed >= 1.0 / 60.0:
-                        # Use a fixed smoothing factor for more consistent movement
-                        # Lower value = smoother but slower response, higher value = faster but potentially jerkier
-                        smoothing_factor = 0.25  # Fixed smoothing factor for consistent movement
-                        
-                        # Handle large jumps more smoothly
-                        position_diff = abs(self._target_position - self._last_position)
-                        if position_diff > 0.05:  # If position change is significant (>5%)
-                            smoothing_factor = 0.4  # Faster response for big jumps
-                        
-                        # Interpolate between current and target position
-                        new_position = self._last_position + (self._target_position - self._last_position) * smoothing_factor
-                        
-                        # Convert position to slider value (0-100)
-                        slider_val = int(new_position * 100)
-                        self.control_panel.timeline_slider.setValue(slider_val)
-                        
-                        # Update stored position
-                        self._last_position = new_position
-                        self._last_position_time = current_time
-                    
-                    # If the analyzer has bag duration info, update that in the control panel
-                    if hasattr(self.analyzer, 'bag_duration') and self.analyzer.bag_duration > 0:
-                        self.control_panel.bag_duration_seconds = self.analyzer.bag_duration
-        except Exception as e:
-            # Silently handle errors in the UI update
-            pass
-    
+        """Slot to receive playback position updates from the analyzer and forward to control panel."""
+        # This slot might now be redundant if the connection is made directly in connect_signals
+        # Keeping it for potential future use or debugging
+        # self.control_panel.update_playback_position(position)
+        pass
+
     @pyqtSlot(str)
     def visualize_pointcloud(self, topic):
         """Visualize point cloud data from a specific topic.
@@ -2572,8 +2172,8 @@ class MainWindow(QMainWindow):
             if self.scatter_view is not None:
                 self.scatter_view.clear_points()
             
-            if self.heatmap_view is not None:
-                self.heatmap_view.reset_heatmap()
+            # if self.heatmap_view is not None: # Removed heatmap view check
+            #     self.heatmap_view.reset_heatmap()
             
             # Reset control panel UI state
             if self.control_panel is not None:
@@ -2620,17 +2220,18 @@ class MainWindow(QMainWindow):
             max_time_interval: Maximum time between updates (seconds)
             threshold_percent: Data change threshold percentage to trigger update
         """
-        if hasattr(self.heatmap_view, 'optimizer'):
-            self.heatmap_view.optimizer.configure(
-                min_time_interval=min_time_interval,
-                max_time_interval=max_time_interval,
-                change_threshold_percent=threshold_percent
-            )
-            self.status_bar.showMessage(
-                f"Visualization performance set to: {min_time_interval}s min, "
-                f"{max_time_interval}s max, {threshold_percent}% threshold", 
-                3000
-            )
+        # if hasattr(self.heatmap_view, 'optimizer'): # Removed optimizer configuration
+        #     self.heatmap_view.optimizer.configure(
+        #         min_time_interval=min_time_interval,
+        #         max_time_interval=max_time_interval,
+        #         change_threshold_percent=threshold_percent
+        #     )
+        #     self.status_bar.showMessage(
+        #         f"Visualization performance set to: {min_time_interval}s min, "
+        #         f"{max_time_interval}s max, {threshold_percent}% threshold", 
+        #         3000
+        #     )
+        pass # Heatmap optimizer removed
     
     def optimize_visualization_pipeline(self):
         """
@@ -2758,7 +2359,7 @@ class MainWindow(QMainWindow):
         dialog.setFileMode(QFileDialog.ExistingFile)
         dialog.setNameFilter("Radar Data Files (*.dat);;CSV Files (*.csv);;All Files (*)")
         dialog.setViewMode(QFileDialog.Detail)
-        dialog.setOption(QFileDialog.DontUseNativeDialog, True)  # Use Qt's dialog for better control
+        dialog.setOption(QFileDialog.DontUseNativeDialog, True)  # Use Qt's dialog instead of native for better control
         dialog.setWindowModality(Qt.WindowModal)  # Make dialog modal to main window only
         
         # Process events to keep UI responsive
@@ -2796,7 +2397,7 @@ class MainWindow(QMainWindow):
                         QMessageBox.critical(self, "Error", f"Error loading data: {str(e)}")
                 else:
                     QMessageBox.warning(self, "Error", "Analyzer not initialized.")
-
+    
     def save_data_file(self):
         """Save radar data to a file."""
         # Check if we have data to save
@@ -2821,7 +2422,7 @@ class MainWindow(QMainWindow):
         dialog.setAcceptMode(QFileDialog.AcceptSave)
         dialog.setNameFilter("Radar Data Files (*.dat);;CSV Files (*.csv);;All Files (*)")
         dialog.setDefaultSuffix("dat")
-        dialog.setOption(QFileDialog.DontUseNativeDialog, True)  # Use Qt's dialog for better control
+        dialog.setOption(QFileDialog.DontUseNativeDialog, True)  # Use Qt's dialog instead of native for better control
         dialog.setWindowModality(Qt.WindowModal)  # Make dialog modal to main window only
         
         # Process events to keep UI responsive
@@ -2901,4 +2502,90 @@ class MainWindow(QMainWindow):
         if isinstance(selected_tab, CombinedView):
             # Ensure views are set in combined view
             self.combined_view.set_views(self.scatter_view, self.heatmap_view)
-            self.status_bar.showMessage("Combined view mode: Use checkboxes to toggle individual views")
+            self.status_bar.showMessage("2D scatter view mode active")
+    
+    @pyqtSlot(float)
+    def set_trail_duration(self, duration):
+        """
+        Set the duration for which points should remain visible in the trail.
+        
+        Args:
+            duration: Duration in seconds
+        """
+        if self.scatter_view:
+            self.scatter_view.set_trail_duration(duration)
+    
+    @pyqtSlot(bool)
+    def set_trail_visibility(self, visible):
+        """
+        Set the visibility of the trail.
+        
+        Args:
+            visible: Whether the trail should be visible
+        """
+        if self.scatter_view:
+            self.scatter_view.toggle_trail(visible)
+    
+    @pyqtSlot(bool)
+    def set_density_coloring(self, enabled):
+        """
+        Set whether to use enhanced density coloring for the trail.
+        
+        Args:
+            enabled: Whether enhanced density coloring should be enabled
+        """
+        if self.scatter_view:
+            self.scatter_view.toggle_density_coloring(enabled)
+    
+    def initiate_report_generation(self):
+        """Handles the actual report generation process after checks."""
+        # --- Point to add data clearing ---
+        # <<<<<<< SEARCH - REMOVE THIS MARKER
+        # ======= - REMOVE THIS MARKER
+        # --- Clear existing experiment data before generating report --- 
+        self.get_logger().info("Clearing existing experiment data before report generation.")
+        try:
+            if hasattr(self.analyzer, 'data_lock'):
+                with self.analyzer.data_lock:
+                    if hasattr(self.analyzer, 'experiment_data'):
+                        # Reset lists directly (mirroring ControlPanel.reset_point_counter)
+                        if hasattr(self.analyzer.experiment_data, 'x_points'): self.analyzer.experiment_data.x_points = []
+                        if hasattr(self.analyzer.experiment_data, 'y_points'): self.analyzer.experiment_data.y_points = []
+                        if hasattr(self.analyzer.experiment_data, 'z_points'): self.analyzer.experiment_data.z_points = []
+                        if hasattr(self.analyzer.experiment_data, 'intensity'): self.analyzer.experiment_data.intensity = []
+                        if hasattr(self.analyzer.experiment_data, 'snr'): self.analyzer.experiment_data.snr = []
+                        if hasattr(self.analyzer.experiment_data, 'noise'): self.analyzer.experiment_data.noise = []
+                        # Reset metrics that might be recalculated
+                        if hasattr(self.analyzer.experiment_data, 'multi_frame_metrics'):
+                            self.analyzer.experiment_data.multi_frame_metrics = {
+                                'total_frames': 0,
+                                'roi_combined_point_count': 0,
+                                'outside_roi_combined_point_count': 0,
+                                'roi_avg_single_frame_count': 0,
+                                'outside_roi_avg_single_frame_count': 0,
+                                'ten_frame_avg_points': 0
+                            }
+                        # Reset distance bands 
+                        if hasattr(self.analyzer.experiment_data, 'metadata'):
+                            metadata = getattr(self.analyzer.experiment_data, 'metadata', {})
+                            if metadata:
+                                metadata['distance_bands'] = {}
+                                metadata['target_band'] = ''
+                                metadata['target_band_count'] = 0
+                                self.analyzer.experiment_data.metadata = metadata
+                        self.get_logger().info("Cleared experiment data lists and metrics.")
+                    else:
+                        self.get_logger().warning("Analyzer has no 'experiment_data' attribute to clear.")
+            else:
+                self.get_logger().warning("Analyzer has no 'data_lock', cannot safely clear data.")
+            
+            # Also reset the point counter display in the control panel
+            if hasattr(self.control_panel, 'reset_point_counter'):
+                self.control_panel.reset_point_counter()
+                self.get_logger().info("Called control panel reset_point_counter.")
+
+        except Exception as e:
+            self.get_logger().error(f"Error clearing data before report generation: {e}", exc_info=True)
+            QMessageBox.warning(self, "Warning", f"Could not fully clear previous data before generating report: {e}")
+        # --- End data clearing ---
+        # >>>>>>> REPLACE - REMOVE THIS MARKER

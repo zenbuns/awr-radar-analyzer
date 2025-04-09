@@ -71,8 +71,8 @@ class RadarExperimentParams:
     # Default sampling circles
     circles: List[SamplingCircle] = field(default_factory=lambda: [
         SamplingCircle(enabled=True, distance=5.0, radius=0.5, angle=0.0, color="lime", label="Primary"),
-        SamplingCircle(enabled=False, distance=15.0, radius=0.5, angle=-60.0, color="cyan", label="Left"),
-        SamplingCircle(enabled=False, distance=25.0, radius=0.5, angle=60.0, color="yellow", label="Right"),
+        SamplingCircle(enabled=False, distance=5.0, radius=0.5, angle=-28.0, color="cyan", label="Left"),
+        SamplingCircle(enabled=False, distance=5.0, radius=0.5, angle=28.0, color="yellow", label="Right"),
     ])
 
     use_directional_distance: bool = False  # Added parameter
@@ -113,6 +113,22 @@ class RadarExperimentParams:
             # Update the primary circle radius attribute for backward compatibility
             if index == 0:
                 self.circle_radius = radius
+    
+    def update_circle_angle(self, index: int, angle: float) -> None:
+        """
+        Update the angle of a sampling circle.
+        
+        Args:
+            index: Index of the circle to update (0-2)
+            angle: New angle in degrees (clamped between -90.0 and 90.0)
+        """
+        if 0 <= index < len(self.circles):
+            # Clamp the angle to a reasonable range
+            clamped_angle = max(-90.0, min(90.0, angle))
+            self.circles[index].angle = clamped_angle
+            print(f"Updated circle {index} angle to {clamped_angle} degrees")
+        else:
+            print(f"Error: Invalid circle index {index}")
     
     def toggle_circle(self, index: int, enabled: bool) -> None:
         """
@@ -155,8 +171,9 @@ class ExperimentData:
     timestamps: List[float] = field(default_factory=list)
     target_distances: List[float] = field(default_factory=list)
     time_series_timestamps: List[float] = field(default_factory=list) 
-    circle_point_counts: List[int] = field(default_factory=list)
-    circle_avg_intensities: List[float] = field(default_factory=list)
+    # Changed to List of Lists to store data for multiple circles (index 0, 1, 2) per timestamp
+    circle_point_counts: List[List[int]] = field(default_factory=list)
+    circle_avg_intensities: List[List[float]] = field(default_factory=list)
     multi_frame_metrics: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)  # Store additional metadata like distance bands
 
@@ -174,8 +191,8 @@ class ExperimentData:
         self.timestamps.clear()
         self.target_distances.clear()
         self.time_series_timestamps.clear()
-        self.circle_point_counts.clear()
-        self.circle_avg_intensities.clear()
+        self.circle_point_counts.clear()       # Clear the outer list
+        self.circle_avg_intensities.clear()    # Clear the outer list
         self.multi_frame_metrics.clear()
         self.metadata.clear()
 
@@ -196,8 +213,8 @@ class ExperimentData:
         self.timestamps.extend(other.timestamps)
         self.target_distances.extend(other.target_distances)
         self.time_series_timestamps.extend(other.time_series_timestamps)
-        self.circle_point_counts.extend(other.circle_point_counts)
-        self.circle_avg_intensities.extend(other.circle_avg_intensities)
+        self.circle_point_counts.extend(other.circle_point_counts)           # Extend the outer list
+        self.circle_avg_intensities.extend(other.circle_avg_intensities)    # Extend the outer list
         
         # Merge multi-frame metrics (add any new keys from other)
         for key, value in other.multi_frame_metrics.items():

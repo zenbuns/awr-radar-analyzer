@@ -34,17 +34,10 @@ from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 from radar_params import RadarExperimentParams, ExperimentData
 from radar_analyzer.processing.data_processor import (
     filter_points_in_circle, 
-    calculate_heatmap_size,
-    update_heatmap_vectorized,
-    update_live_heatmap_vectorized,
-    apply_live_heatmap_decay,
-    compute_heatmap_metrics
 )
 from radar_analyzer.visualization.visualizer import (
     setup_visualization,
-    setup_heatmap_visualization,
     update_plot,
-    update_heatmap_display,
     update_circle_position,
     update_circle_radius,
     save_visualization
@@ -152,10 +145,16 @@ class RadarPointCloudAnalyzer(Node):
             history=QoSHistoryPolicy.KEEP_LAST,
             depth=10
         )
+        # Define QoS profile for sensor data (often BEST_EFFORT)
+        self.sensor_qos = QoSProfile(
+            reliability=QoSReliabilityPolicy.BEST_EFFORT,
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=1  # Keep only the latest for best effort
+        )
         
-        # Use the reliable QoS profile for all subscriptions
+        # Use the sensor QoS profile for the point cloud subscription
         self.pcl_subscription = self.create_subscription(
-            PointCloud2, '/ti_mmwave/radar_scan_pcl', self.pcl_callback, self.reliable_qos
+            PointCloud2, '/ti_mmwave/radar_scan_pcl', self.pcl_callback, self.sensor_qos
         )
         self.track_array_subscription = self.create_subscription(
             MarkerArray, '/ti_mmwave/radar_track_marker_array', 
@@ -195,28 +194,6 @@ class RadarPointCloudAnalyzer(Node):
             'roi_indicators': []
         }
 
-        # FIXED: Ensure proper grid size calculation for heatmap data 
-        # that handles the full max_range of 35.0 meters
-        grid_size = calculate_heatmap_size(self.params)
-        self.get_logger().info(f"Initializing heatmap with grid size {grid_size} for max_range={self.params.max_range}m")
-        
-        # FIXED: Verify the grid size is adequate for the max range
-        resolution = self.params.heatmap_resolution
-        expected_size = int(2 * self.params.max_range / resolution)
-        if expected_size > grid_size[0]:
-            self.get_logger().warning(
-                f"Grid size {grid_size} may be too small for max_range={self.params.max_range}m "
-                f"with resolution={resolution}m. Expected minimum: {expected_size}"
-            )
-            # Force correction to ensure proper size
-            grid_size = (expected_size, expected_size)
-            if expected_size % 2 == 1:
-                grid_size = (expected_size + 1, expected_size + 1)  # Ensure even size
-                
-        self.heatmap_data = np.zeros(grid_size, dtype=np.float32)
-        self.live_heatmap_data = np.zeros(grid_size, dtype=np.float32)
-        self.live_heatmap_decay_factor = 0.98
-
         # Cached circle center for performance - initialize with safe defaults
         self._cached_circle_center = np.array([0, self.params.circle_distance])
 
@@ -242,7 +219,19 @@ class RadarPointCloudAnalyzer(Node):
         self.bag_start_time = None
         self.bag_duration = 0.0
 
+        # Check ROS 2 availability
+        self.ros2_available = self._check_ros2_availability()
+        if self.ros2_available:
+            self.get_logger().info("ROS 2 'ros2' command found. Bag operations enabled.")
+        else:
+            self.get_logger().warn("ROS 2 'ros2' command not found. Bag operations will be disabled.")
+
         self.get_logger().info('Radar Point Cloud Analyzer node initialized with ROS2 bag support')
+
+    def _check_ros2_availability(self) -> bool:
+        """Check if the 'ros2' command is available in the system PATH."""
+        import shutil
+        return shutil.which("ros2") is not None
 
     def pcl_callback(self, msg: PointCloud2) -> None:
         """
@@ -384,13 +373,6 @@ class RadarPointCloudAnalyzer(Node):
                 self, x_array, y_array, intensities_array
             )
             
-            # CRITICAL FIX: Update heatmap even during data collection
-            # Without this, the heatmap stays empty during collection
-            apply_live_heatmap_decay(self)
-            update_live_heatmap_vectorized(
-                self, x_array, y_array, intensities_array
-            )
-            
             # Store data for collection
             if self.collection_start_time is not None:
                 self.process_collected_data(z_array)
@@ -421,14 +403,6 @@ class RadarPointCloudAnalyzer(Node):
             
             # Process all circle points for visualization
             filter_points_in_circle(
-                self, x_array, y_array, intensities_array
-            )
-
-            # Decay before adding new data
-            apply_live_heatmap_decay(self)
-
-            # Update live heatmap
-            update_live_heatmap_vectorized(
                 self, x_array, y_array, intensities_array
             )
 
@@ -691,7 +665,6 @@ class RadarPointCloudAnalyzer(Node):
 
         try:
             self.experiment_data.clear()
-            self.heatmap_data = np.zeros(calculate_heatmap_size(self.params), dtype=np.float32)
 
             self.params.current_config = config_name
             self.params.target_distance = float(target_distance)
@@ -785,26 +758,33 @@ class RadarPointCloudAnalyzer(Node):
             })
             df.to_csv(data_file, index=False)
 
-            # Save heatmap data
-            heatmap_file = os.path.join(
-                config_dir,
-                f"heatmap_{int(self.params.target_distance)}m_{timestamp}.npz"
-            )
-            np.savez_compressed(heatmap_file, heatmap=self.heatmap_data)
-
-            self.get_logger().info(f'Saved experiment data to {data_file}')
-
             # Save time-series data
             if self.experiment_data.time_series_timestamps:
                 ts_file = os.path.join(
                     config_dir,
                     f"time_series_{int(self.params.target_distance)}m_{timestamp}.csv"
                 )
-                df_ts = pd.DataFrame({
-                    'timestamp': self.experiment_data.time_series_timestamps,
-                    'circle_points': self.experiment_data.circle_point_counts,
-                    'circle_avg_intensity': self.experiment_data.circle_avg_intensities
-                })
+                # Prepare data dictionary for DataFrame, handling nested lists
+                ts_data = {
+                    'timestamp': self.experiment_data.time_series_timestamps
+                }
+                # Assuming 3 circles, create columns for each circle's count and avg_intensity
+                num_circles = 3 # Should ideally get this dynamically if possible
+                if self.experiment_data.circle_point_counts and len(self.experiment_data.circle_point_counts[0]) == num_circles:
+                    for i in range(num_circles):
+                        # Get label for column naming (fallback to index)
+                        label = self.params.circles[i].label if i < len(self.params.circles) else f'circle{i}'
+                        label = label.lower().replace(" ", "_") # Make label CSV-friendly
+                        
+                        ts_data[f'{label}_points'] = [counts[i] for counts in self.experiment_data.circle_point_counts]
+                        ts_data[f'{label}_avg_intensity'] = [intensities[i] for intensities in self.experiment_data.circle_avg_intensities]
+                else:
+                     self.get_logger().warn("Time-series data format mismatch or empty. Skipping detailed circle columns.")
+                     # Fallback to old single columns if data structure is unexpected
+                     ts_data['circle_points'] = [item[0] if isinstance(item, list) and item else 0 for item in self.experiment_data.circle_point_counts]
+                     ts_data['circle_avg_intensity'] = [item[0] if isinstance(item, list) and item else 0.0 for item in self.experiment_data.circle_avg_intensities]
+
+                df_ts = pd.DataFrame(ts_data)
                 df_ts.to_csv(ts_file, index=False)
                 self.get_logger().info(f'Saved time series data to {ts_file}')
                 
@@ -993,6 +973,25 @@ class RadarPointCloudAnalyzer(Node):
                     results_dict['roi_spatial_density'] = self.experiment_data.multi_frame_metrics.get('roi_spatial_density', 0)
                     results_dict['roi_snr_db'] = self.experiment_data.multi_frame_metrics.get('roi_snr_db', 0)
                 
+                # Copy secondary ROI metrics (roi2, roi3) to the top level for easier access in reports
+                for i in range(1, len(self.params.circles)):
+                    if self.params.circles[i].enabled:
+                        prefix = f'roi{i+1}'
+                        if f'{prefix}_combined_point_count' in self.experiment_data.multi_frame_metrics:
+                            self.get_logger().info(f"Adding {prefix} metrics to top level for reports")
+                            
+                            # Copy the metrics to the top level
+                            results_dict[f'{prefix}_combined_point_count'] = self.experiment_data.multi_frame_metrics[f'{prefix}_combined_point_count']
+                            results_dict[f'{prefix}_avg_single_frame_count'] = self.experiment_data.multi_frame_metrics.get(f'{prefix}_avg_single_frame_count', 0)
+                            results_dict[f'{prefix}_spatial_density'] = self.experiment_data.multi_frame_metrics.get(f'{prefix}_spatial_density', 0)
+                            results_dict[f'{prefix}_snr_db'] = self.experiment_data.multi_frame_metrics.get(f'{prefix}_snr_db', 0)
+                            results_dict[f'{prefix}_combined_min_intensity'] = self.experiment_data.multi_frame_metrics.get(f'{prefix}_combined_min_intensity', 0)
+                            results_dict[f'{prefix}_combined_max_intensity'] = self.experiment_data.multi_frame_metrics.get(f'{prefix}_combined_max_intensity', 0)
+                            results_dict[f'{prefix}_combined_avg_intensity'] = self.experiment_data.multi_frame_metrics.get(f'{prefix}_combined_avg_intensity', 0)
+                        else:
+                            # Skip the debug warnings about missing metrics
+                            pass
+                
                 # Also include outside ROI metrics at top level
                 if 'outside_roi_combined_point_count' in self.experiment_data.multi_frame_metrics:
                     results_dict['outside_roi_combined_point_count'] = self.experiment_data.multi_frame_metrics['outside_roi_combined_point_count']
@@ -1053,180 +1052,90 @@ class RadarPointCloudAnalyzer(Node):
             z_array: Z-coordinates of the current point cloud.
         """
         try:
-            # Ensure we have z_array data
-            if z_array is None or len(z_array) == 0:
-                self.get_logger().warn("No z-data available for collection")
-                return
-                
             timestamp = (
                 self.get_clock().now().to_msg().sec
                 + self.get_clock().now().to_msg().nanosec * 1e-9
             )
             
-            # Process data for the primary circle (for backward compatibility)
-            indices = self.current_data.get('circle_indices', np.array([], dtype=np.int32))
-            circle_point_count = len(indices) if indices is not None else 0
-            
-            # Get distance bands information if available
-            distance_bands = self.current_data.get('circle_distance_bands', {})
-            target_dist = self.params.target_distance
-            target_band_key = None
-            target_band_width = 1.0  # 1-meter bands
-            
-            # Find the distance band that contains the target distance
-            target_band_start = int(np.floor(target_dist))
-            target_band_key = f"{target_band_start}m-{target_band_start + target_band_width}m"
-            
-            # Log comprehensive information about distance bands and target distance
-            if distance_bands:
-                band_counts = [f"{k}: {v['count']} pts" for k, v in distance_bands.items()]
-                bands_str = ", ".join(band_counts)
-                self.get_logger().debug(
-                    f"Primary circle distance bands: {bands_str}, target distance: {target_dist}m, " +
-                    f"target band: {target_band_key}"
-                )
-            
-            # Detailed debug info for troubleshooting edge points
-            if hasattr(self, 'params') and hasattr(self.params, 'circles') and len(self.params.circles) > 0:
-                primary_circle = self.params.circles[0]
-                self.get_logger().debug(
-                    f"Processing primary circle at distance={primary_circle.distance:.2f}m, " +
-                    f"radius={primary_circle.radius:.2f}m, found {circle_point_count} points"
-                )
-            
-            if len(indices) > 0 and len(indices) <= len(z_array):
-                # Create a separate ExperimentData object for each distance band
-                circle_data = ExperimentData()
-                target_band_points = ExperimentData()
-                
-                # Store point data for all points in the circle
-                circle_data.x_points = self.current_data['circle_x'].tolist()
-                circle_data.y_points = self.current_data['circle_y'].tolist()
-                circle_data.z_points = z_array[indices].tolist()
-                circle_data.intensities = self.current_data['circle_intensities'].tolist()
-                circle_data.timestamps = [timestamp] * len(self.current_data['circle_x'])
-                circle_data.target_distances = [self.params.target_distance] * len(self.current_data['circle_x'])
-                
-                # Calculate statistics for all points
-                count = len(self.current_data['circle_x'])
-                avg_intensity = (
-                    float(np.mean(self.current_data['circle_intensities']))
-                    if len(self.current_data['circle_intensities']) > 0
-                    else 0
-                )
-                
-                # Store time series data
-                circle_data.time_series_timestamps = [timestamp]
-                circle_data.circle_point_counts = [count]
-                circle_data.circle_avg_intensities = [avg_intensity]
-                
-                # If we have distance bands, extract points in the target band
-                target_band_count = 0
-                if target_band_key in distance_bands:
-                    band_data = distance_bands[target_band_key]
-                    band_indices = band_data['indices']
-                    target_band_count = band_data['count']
-                    
-                    # Store points from the target distance band separately
-                    if len(band_indices) > 0:
-                        target_band_points.x_points = self.current_data['circle_x'][band_indices].tolist()
-                        target_band_points.y_points = self.current_data['circle_y'][band_indices].tolist()
-                        target_band_points.intensities = self.current_data['circle_intensities'][band_indices].tolist()
-                        target_band_points.timestamps = [timestamp] * len(band_indices)
-                        target_band_points.target_distances = [self.params.target_distance] * len(band_indices)
-                        
-                        if len(indices[band_indices]) <= len(z_array):
-                            target_band_points.z_points = z_array[indices[band_indices]].tolist()
-                        
-                        # Store statistics for the target band
-                        target_band_points.time_series_timestamps = [timestamp]
-                        target_band_points.circle_point_counts = [target_band_count]
-                        if len(band_indices) > 0:
-                            avg_band_intensity = float(np.mean(self.current_data['circle_intensities'][band_indices]))
-                            target_band_points.circle_avg_intensities = [avg_band_intensity]
-                
-                # Store distance band information in metadata
-                circle_data.metadata['distance_bands'] = {k: v['count'] for k, v in distance_bands.items()}
-                circle_data.metadata['target_distance'] = self.params.target_distance
-                circle_data.metadata['target_band'] = target_band_key
-                circle_data.metadata['target_band_count'] = target_band_count
-                circle_data.metadata['total_count'] = count
-                
-                # Add to experiment data
-                self.experiment_data.extend(circle_data)
-                
-                # Log success with more detail to help debug edge cases
-                if count > 0:
-                    x_points = np.array(circle_data.x_points)
-                    y_points = np.array(circle_data.y_points)
-                    if len(x_points) > 0 and len(y_points) > 0:
-                        # Calculate radial distances from the origin (0,0)
-                        distances = np.sqrt(x_points**2 + y_points**2)
-                        min_dist = np.min(distances)
-                        max_dist = np.max(distances)
-                        self.get_logger().debug(
-                            f"Added {count} points to experiment data, " +
-                            f"distance range: {min_dist:.2f}m - {max_dist:.2f}m, " +
-                            f"target band ({target_band_key}): {target_band_count} points"
-                        )
+            # --- Process data for ALL enabled circles --- 
+            counts_per_circle = []
+            avg_intensities_per_circle = []
+            all_x = []
+            all_y = []
+            all_z = []
+            all_intensities = []
+            all_timestamps = []
+            all_target_distances = []
 
-                # Update heatmap
-                update_heatmap_vectorized(
-                    self,
-                    self.current_data['circle_x'],
-                    self.current_data['circle_y'],
-                    self.current_data['circle_intensities']
-                )
-                
-            # Process data for secondary circles with similar approach
-            # (secondary circle processing can be extended with similar distance band handling)
-            for i in range(1, len(self.params.circles)):
-                if not self.params.circles[i].enabled:
-                    self.get_logger().debug(f"Secondary circle {i} is disabled, skipping")
+            for i, circle_param in enumerate(self.params.circles):
+                if not circle_param.enabled:
+                    # Append default values for disabled circles
+                    counts_per_circle.append(0)
+                    avg_intensities_per_circle.append(0.0)
                     continue
-                    
-                circle_key = f'circle{i+1}'
-                secondary_indices = self.current_data.get(f'{circle_key}_indices', np.array([], dtype=np.int32))
-                self.get_logger().debug(f"Processing secondary circle {i}: {len(secondary_indices)} points")
+
+                # Construct keys for accessing circle-specific data in self.current_data
+                circle_key_prefix = f'circle{i+1}' if i > 0 else 'circle' # 'circle' for index 0, 'circle2' for 1, 'circle3' for 2
+                x_key = f'{circle_key_prefix}_x' if i > 0 else 'circle_x'
+                y_key = f'{circle_key_prefix}_y' if i > 0 else 'circle_y'
+                intensity_key = f'{circle_key_prefix}_intensities' if i > 0 else 'circle_intensities'
+                index_key = f'{circle_key_prefix}_indices' if i > 0 else 'circle_indices'
+
+                # Get data for the current circle
+                x_data = self.current_data.get(x_key, np.array([], dtype=np.float32))
+                y_data = self.current_data.get(y_key, np.array([], dtype=np.float32))
+                intensities_data = self.current_data.get(intensity_key, np.array([], dtype=np.float32))
+                indices = self.current_data.get(index_key, np.array([], dtype=np.int32))
                 
-                # Get distance bands for this secondary circle
-                secondary_distance_bands = self.current_data.get(f'{circle_key}_distance_bands', {})
-                if secondary_distance_bands:
-                    band_counts = [f"{k}: {v['count']} pts" for k, v in secondary_distance_bands.items()]
-                    bands_str = ", ".join(band_counts)
-                    self.get_logger().debug(f"Secondary circle {i} distance bands: {bands_str}")
+                current_circle_count = len(indices) if indices is not None and indices.size > 0 else 0
+                current_avg_intensity = float(np.mean(intensities_data)) if current_circle_count > 0 else 0.0
                 
-                if len(secondary_indices) > 0 and len(secondary_indices) <= len(z_array):
-                    # Create secondary circle data
-                    secondary_circle_data = ExperimentData()
+                counts_per_circle.append(current_circle_count)
+                avg_intensities_per_circle.append(current_avg_intensity)
+                
+                # Collect point data if circle has points
+                if current_circle_count > 0 and len(indices) <= len(z_array):
+                    all_x.extend(x_data.tolist())
+                    all_y.extend(y_data.tolist())
+                    all_z.extend(z_array[indices].tolist())
+                    all_intensities.extend(intensities_data.tolist())
+                    all_timestamps.extend([timestamp] * current_circle_count)
+                    all_target_distances.extend([self.params.target_distance] * current_circle_count)
                     
-                    # Store point data
-                    secondary_circle_data.x_points = self.current_data[f'{circle_key}_x'].tolist()
-                    secondary_circle_data.y_points = self.current_data[f'{circle_key}_y'].tolist()
-                    secondary_circle_data.z_points = z_array[secondary_indices].tolist()
-                    secondary_circle_data.intensities = self.current_data[f'{circle_key}_intensities'].tolist()
-                    secondary_circle_data.timestamps = [timestamp] * len(self.current_data[f'{circle_key}_x'])
-                    secondary_circle_data.target_distances = [self.params.target_distance] * len(self.current_data[f'{circle_key}_x'])
-                    
-                    # Calculate statistics
-                    count = len(self.current_data[f'{circle_key}_x'])
-                    avg_intensity = (
-                        float(np.mean(self.current_data[f'{circle_key}_intensities']))
-                        if len(self.current_data[f'{circle_key}_intensities']) > 0
-                        else 0
+                    self.get_logger().debug(
+                        f"Circle {i} ('{circle_param.label}'): Added {current_circle_count} points. "
+                        f"Avg Intensity: {current_avg_intensity:.2f}"
                     )
-                    
-                    # Store time series data
-                    secondary_circle_data.time_series_timestamps = [timestamp]
-                    secondary_circle_data.circle_point_counts = [count]
-                    secondary_circle_data.circle_avg_intensities = [avg_intensity]
-                    
-                    # Store distance band information in metadata
-                    secondary_circle_data.metadata['distance_bands'] = {k: v['count'] for k, v in secondary_distance_bands.items()}
-                    
-                    # Add to experiment data
-                    self.experiment_data.extend(secondary_circle_data)
-                    
+                else:
+                    self.get_logger().debug(f"Circle {i} ('{circle_param.label}'): No points found or index mismatch.")
+
+            # Append the collected lists for this timestamp to ExperimentData
+            if any(count > 0 for count in counts_per_circle):
+                self.experiment_data.time_series_timestamps.append(timestamp)
+                self.experiment_data.circle_point_counts.append(counts_per_circle)
+                self.experiment_data.circle_avg_intensities.append(avg_intensities_per_circle)
+                
+                # Extend point data
+                self.experiment_data.x_points.extend(all_x)
+                self.experiment_data.y_points.extend(all_y)
+                self.experiment_data.z_points.extend(all_z)
+                self.experiment_data.intensities.extend(all_intensities)
+                self.experiment_data.timestamps.extend(all_timestamps)
+                self.experiment_data.target_distances.extend(all_target_distances)
+                
+                # Format the avg intensities list for logging
+                avg_intensities_str = ", ".join([f'{v:.2f}' for v in avg_intensities_per_circle])
+                self.get_logger().debug(
+                    f"Appended time series data for timestamp {timestamp}: "
+                    f"Counts={counts_per_circle}, AvgIntensities=[{avg_intensities_str}]"
+                )
+            else:
+                # Optionally, still append timestamp even if no points found in any circle?
+                # self.experiment_data.time_series_timestamps.append(timestamp)
+                # self.experiment_data.circle_point_counts.append([0, 0, 0])
+                # self.experiment_data.circle_avg_intensities.append([0.0, 0.0, 0.0])
+                self.get_logger().debug(f"No points found in any enabled circle for timestamp {timestamp}. Skipping append.")
+
         except Exception as e:
             self.get_logger().error(f"Error in process_collected_data: {str(e)}")
             
@@ -1253,10 +1162,11 @@ class RadarPointCloudAnalyzer(Node):
                 
                 # Initialize data arrays for additional circles
                 for i in range(1, len(self.params.circles)):
-                    self.current_data[f'circle{i+1}_x'] = np.array([], dtype=np.float32)
-                    self.current_data[f'circle{i+1}_y'] = np.array([], dtype=np.float32)
-                    self.current_data[f'circle{i+1}_intensities'] = np.array([], dtype=np.float32)
-                    self.current_data[f'circle{i+1}_indices'] = np.array([], dtype=np.int32)
+                    circle_key = f'circle{i+1}'
+                    self.current_data[f'{circle_key}_x'] = np.array([], dtype=np.float32)
+                    self.current_data[f'{circle_key}_y'] = np.array([], dtype=np.float32)
+                    self.current_data[f'{circle_key}_intensities'] = np.array([], dtype=np.float32)
+                    self.current_data[f'{circle_key}_indices'] = np.array([], dtype=np.int32)
                 
                 # Reset heatmap data
                 grid_size = calculate_heatmap_size(self.params)
@@ -1299,81 +1209,6 @@ class RadarPointCloudAnalyzer(Node):
                 
         except Exception as e:
             self.get_logger().error(f"Error during PCL hard reset: {str(e)}")
-            
-    def reset_live_heatmap(self) -> None:
-        """
-        Reset only the live heatmap data while preserving other data structures.
-        
-        This method specifically clears the live_heatmap_data array to reset
-        the real-time decaying heatmap visualization, without affecting other
-        data structures or the persistent heatmap.
-        """
-        try:
-            with self.data_lock:
-                # Reset only the live heatmap data
-                grid_size = calculate_heatmap_size(self.params)
-                self.live_heatmap_data = np.zeros(grid_size, dtype=np.float32)
-                
-                # Safely clear contours without direct collections assignment
-                if 'ax' in self.heatmap_viz and self.heatmap_viz['ax'] is not None:
-                    try:
-                        # First, clear the contour reference
-                        old_contour = self.heatmap_viz.get('contour', None)
-                        self.heatmap_viz['contour'] = None
-                        
-                        # Safely remove collections one by one
-                        ax = self.heatmap_viz['ax']
-                        if hasattr(ax, 'collections'):
-                            # If we have a specific contour object with collections, remove those first
-                            try:
-                                if old_contour is not None and hasattr(old_contour, 'collections'):
-                                    for coll in old_contour.collections:
-                                        try:
-                                            coll.remove()
-                                        except Exception as e:
-                                            self.get_logger().debug(f"Error removing specific contour collection: {str(e)}")
-                            except Exception as e:
-                                self.get_logger().debug(f"Error handling contour collections: {str(e)}")
-                                
-                            # Remove remaining collections one by one as a fallback
-                            while len(ax.collections) > 0:
-                                try:
-                                    # Always remove the first collection
-                                    ax.collections[0].remove()
-                                except Exception as e:
-                                    self.get_logger().debug(f"Error removing collection: {str(e)}")
-                                    # Break the loop to prevent infinite looping
-                                    break
-                        
-                        # Force a canvas redraw to ensure clean state
-                        if 'fig' in self.heatmap_viz and self.heatmap_viz['fig'] is not None:
-                            if hasattr(self.heatmap_viz['fig'].canvas, 'draw'):
-                                self.heatmap_viz['fig'].canvas.draw()
-                    except Exception as e:
-                        self.get_logger().debug(f"Error clearing contours during reset: {str(e)}")
-                
-                # Update heatmap data if present
-                if 'heatmap' in self.heatmap_viz and self.heatmap_viz['heatmap'] is not None:
-                    try:
-                        self.heatmap_viz['heatmap'].set_data(self.live_heatmap_data)
-                        
-                        # Draw using idle for better performance
-                        if 'fig' in self.heatmap_viz and self.heatmap_viz['fig'] is not None:
-                            if hasattr(self.heatmap_viz['fig'].canvas, 'draw_idle'):
-                                self.heatmap_viz['fig'].canvas.draw_idle()
-                    except Exception as e:
-                        self.get_logger().debug(f"Error updating heatmap data: {str(e)}")
-                
-                # Emit a signal to notify UI components
-                try:
-                    self.signals.data_reset_signal.emit()
-                    self.get_logger().debug("Emitted reset_heatmap signal to ensure clean state")
-                except Exception as e:
-                    self.get_logger().debug(f"Failed to emit reset signal: {str(e)}")
-                
-                self.get_logger().info("Reset live heatmap data")
-        except Exception as e:
-            self.get_logger().error(f"Error resetting live heatmap: {str(e)}")
             
     def play_rosbag(self, bag_path: str, loop: bool = False) -> bool:
         """
@@ -1480,29 +1315,25 @@ class RadarPointCloudAnalyzer(Node):
 
     def compute_heatmap_metrics(self) -> Dict[str, float]:
         """
-        Compute scientific metrics of the live heatmap.
-        
-        This is a wrapper around the compute_heatmap_metrics function from the
-        data_processor module that maintains proper error handling and 
-        provides analytics data for the UI.
+        Compute metrics based on the current live heatmap data.
 
+        Calculates statistics like max/average intensity, SNR, and coverage.
+        These metrics provide insights into the overall signal strength and distribution
+        in the radar's field of view.
+        
         Returns:
-            Dictionary of relevant metrics including max_intensity, avg_intensity,
-            snr_dB, active_cells, total_cells, and coverage_percentage.
+            Dictionary containing computed heatmap metrics.
         """
-        from radar_analyzer.processing.data_processor import compute_heatmap_metrics as compute_metrics_func
-        try:
-            return compute_metrics_func(self)
-        except Exception as e:
-            self.get_logger().error(f"Error computing heatmap metrics: {str(e)}")
-            return {
-                'max_intensity': 0.0,
-                'avg_intensity': 0.0,
-                'snr_dB': 0.0,
-                'active_cells': 0.0,
-                'total_cells': 1.0,
-                'coverage_percentage': 0.0
-            }
+        # Removed heatmap metrics computation
+        self.get_logger().info("Heatmap metrics calculation removed.")
+        return {
+            'max_intensity': 0.0,
+            'avg_intensity': 0.0,
+            'snr_dB': 0.0,
+            'active_cells': 0.0,
+            'total_cells': 1.0,
+            'coverage_percentage': 0.0
+        }
 
     def update_circle_position(self, distance: float) -> None:
         """

@@ -13,14 +13,15 @@ from PyQt5.QtWidgets import (
     QPushButton, QProgressBar, QFormLayout, QButtonGroup,
     QRadioButton, QFileDialog, QDoubleSpinBox, QTabWidget,
     QGridLayout, QFrame, QDialog, QListWidget, QListWidgetItem,
-    QInputDialog, QDialogButtonBox, QMessageBox
+    QInputDialog, QDialogButtonBox, QMessageBox,
+    QStyleOptionSlider, QStyle # Added missing imports
 )
 from PyQt5.QtGui import QPixmap, QColor, QPainter, QIcon
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QSize, QDateTime, QThread
 import os
 import json
-from radar_analyzer.processing.data_processor import filter_points_in_circle, calculate_heatmap_size
-from radar_analyzer.visualization.visualizer import update_plot, update_heatmap_display
+from radar_analyzer.processing.data_processor import filter_points_in_circle
+from radar_analyzer.visualization.visualizer import update_plot
 from radar_analyzer.utils.ros_bag_handler import play_rosbag, record_rosbag, stop_rosbag
 import time
 import glob
@@ -28,6 +29,47 @@ from PyQt5.QtWidgets import QApplication
 import numpy as np
 import math
 from datetime import datetime
+import logging
+import subprocess # Added for bag info
+
+
+# Define Predefined Experimental Configurations
+PREDEFINED_CONFIGS = {
+    # --- Left Circle (-55 deg) ---
+    "Left_5m":   {"target_distance": 5.0,  "active_circle": 1, "circles": [{"enabled": False, "distance": 5.0, "angle": 0.0}, {"enabled": True, "distance": 5.0,  "angle": -28.0}, {"enabled": False, "distance": 5.0, "angle": 28.0}]},
+    "Left_10m":  {"target_distance": 10.0, "active_circle": 1, "circles": [{"enabled": False, "distance": 5.0, "angle": 0.0}, {"enabled": True, "distance": 10.0, "angle": -28.0}, {"enabled": False, "distance": 5.0, "angle": 28.0}]},
+    "Left_15m":  {"target_distance": 15.0, "active_circle": 1, "circles": [{"enabled": False, "distance": 5.0, "angle": 0.0}, {"enabled": True, "distance": 15.0, "angle": -28.0}, {"enabled": False, "distance": 5.0, "angle": 28.0}]},
+    "Left_20m":  {"target_distance": 20.0, "active_circle": 1, "circles": [{"enabled": False, "distance": 5.0, "angle": 0.0}, {"enabled": True, "distance": 20.0, "angle": -28.0}, {"enabled": False, "distance": 5.0, "angle": 28.0}]},
+    "Left_25m":  {"target_distance": 25.0, "active_circle": 1, "circles": [{"enabled": False, "distance": 5.0, "angle": 0.0}, {"enabled": True, "distance": 25.0, "angle": -28.0}, {"enabled": False, "distance": 5.0, "angle": 28.0}]},
+    # --- Middle Circle (0 deg) ---
+    "Middle_5m":  {"target_distance": 5.0,  "active_circle": 0, "circles": [{"enabled": True, "distance": 5.0,  "angle": 0.0}, {"enabled": False, "distance": 5.0, "angle": -28.0}, {"enabled": False, "distance": 5.0, "angle": 28.0}]},
+    "Middle_10m": {"target_distance": 10.0, "active_circle": 0, "circles": [{"enabled": True, "distance": 10.0, "angle": 0.0}, {"enabled": False, "distance": 5.0, "angle": -28.0}, {"enabled": False, "distance": 5.0, "angle": 28.0}]},
+    "Middle_15m": {"target_distance": 15.0, "active_circle": 0, "circles": [{"enabled": True, "distance": 15.0, "angle": 0.0}, {"enabled": False, "distance": 5.0, "angle": -28.0}, {"enabled": False, "distance": 5.0, "angle": 28.0}]},
+    "Middle_20m": {"target_distance": 20.0, "active_circle": 0, "circles": [{"enabled": True, "distance": 20.0, "angle": 0.0}, {"enabled": False, "distance": 5.0, "angle": -28.0}, {"enabled": False, "distance": 5.0, "angle": 28.0}]},
+    "Middle_25m": {"target_distance": 25.0, "active_circle": 0, "circles": [{"enabled": True, "distance": 25.0, "angle": 0.0}, {"enabled": False, "distance": 5.0, "angle": -28.0}, {"enabled": False, "distance": 5.0, "angle": 28.0}]},
+    # --- Right Circle (55 deg) ---
+    "Right_5m":   {"target_distance": 5.0,  "active_circle": 2, "circles": [{"enabled": False, "distance": 5.0, "angle": 0.0}, {"enabled": False, "distance": 5.0, "angle": -28.0}, {"enabled": True, "distance": 5.0,  "angle": 28.0}]},
+    "Right_10m":  {"target_distance": 10.0, "active_circle": 2, "circles": [{"enabled": False, "distance": 5.0, "angle": 0.0}, {"enabled": False, "distance": 5.0, "angle": -28.0}, {"enabled": True, "distance": 10.0, "angle": 28.0}]},
+    "Right_15m":  {"target_distance": 15.0, "active_circle": 2, "circles": [{"enabled": False, "distance": 5.0, "angle": 0.0}, {"enabled": False, "distance": 5.0, "angle": -28.0}, {"enabled": True, "distance": 15.0, "angle": 28.0}]},
+    "Right_20m":  {"target_distance": 20.0, "active_circle": 2, "circles": [{"enabled": False, "distance": 5.0, "angle": 0.0}, {"enabled": False, "distance": 5.0, "angle": -28.0}, {"enabled": True, "distance": 20.0, "angle": 28.0}]},
+    "Right_25m":  {"target_distance": 25.0, "active_circle": 2, "circles": [{"enabled": False, "distance": 5.0, "angle": 0.0}, {"enabled": False, "distance": 5.0, "angle": -28.0}, {"enabled": True, "distance": 25.0, "angle": 28.0}]},
+}
+
+# Define Hardware Configuration Files (Based on user image)
+HARDWARE_CONFIG_FILES = [
+    "corner_2.cfg",
+    "corner_3.cfg",
+    "corner_4.cfg",
+    "corner_5.cfg",
+    "corner_6.cfg",
+    "corner_8.cfg",
+    "corner_9.cfg",
+    "corner_experi.cfg",
+    "corner_optimal.cfg",
+    "corner_optimal2.cfg",
+    "corner_optimal3.cfg",
+    "corner_stan.cfg",
+]
 
 
 class ControlPanel(QWidget):
@@ -59,6 +101,10 @@ class ControlPanel(QWidget):
         save_heatmap: Emitted when the heatmap should be saved.
         export_plot: Emitted when the scientific plot should be exported.
         generate_report: Emitted when a report should be generated.
+        trail_duration_changed: Emitted when the trail duration changes.
+        trail_decay_factor_changed: Emitted when the trail decay factor changes.
+        trail_visibility_changed: Emitted when the trail visibility toggle changes.
+        density_coloring_changed: Emitted when the density coloring toggle changes.
     """
     
     # Define signals
@@ -79,6 +125,10 @@ class ControlPanel(QWidget):
     save_heatmap = pyqtSignal()
     export_plot = pyqtSignal()
     generate_report = pyqtSignal()
+    trail_duration_changed = pyqtSignal(float)  # Duration in seconds
+    trail_decay_factor_changed = pyqtSignal(float)  # Decay factor for trail
+    trail_visibility_changed = pyqtSignal(bool)  # Trail visibility toggle
+    density_coloring_changed = pyqtSignal(bool)  # Density coloring toggle
     
     # ROS2 Bag and Point Cloud signals
     play_rosbag = pyqtSignal(str)  # Path to bag file
@@ -99,6 +149,9 @@ class ControlPanel(QWidget):
         # Store reference to main window
         self.main_window = parent
         
+        # Initialize bag duration attribute
+        self.bag_duration_seconds = 0.0
+        
         # Default values
         self.collection_start_time = None
         self.collection_duration = 60
@@ -108,29 +161,36 @@ class ControlPanel(QWidget):
         self.point_history = []
         self.bag_started_for_generation = False
         self.manual_stop_requested = False  # Track if collection was manually stopped
+        self.collecting_bag_path = None  # Path to the ROS2 bag being recorded during collection
         
         # Initialize the state manager
         from ui.state_manager import ApplicationStateManager
         self.state_manager = ApplicationStateManager(self)
         
-        # Set up progress update timer
-        self.progress_timer = QTimer(self)
-        self.progress_timer.timeout.connect(self.update_progress)
-        
-        # Create a folder to store application settings
-        self.settings_dir = os.path.join(os.path.expanduser("~"), ".radar_analyzer")
-        if not os.path.exists(self.settings_dir):
-            os.makedirs(self.settings_dir, exist_ok=True)
-        self.settings_file = os.path.join(self.settings_dir, "ui_settings.json")
-        
         # Initialize status bar (must be before setup_ui)
         self.status_bar = QLabel("Ready")
-        self.status_bar.setStyleSheet("color: #cccccc; font-style: italic;")
         self.status_timer = QTimer()
         self.status_timer.setSingleShot(True)
         self.status_timer.timeout.connect(self.clear_status)
         
-        # Set up the UI
+        # Set up progress update timer
+        self.progress_timer = QTimer(self)
+        self.progress_timer.timeout.connect(self.update_progress)
+        
+        # Set up timeline update timer with debouncing
+        self.timeline_timer = QTimer(self)
+        self.timeline_timer.setSingleShot(True)
+        self.timeline_timer.timeout.connect(self._send_pending_seek)
+        self.pending_seek_position = 0.0
+        
+        # Set up recording status update timer
+        self.recording_timer = QTimer(self)
+        self.recording_timer.timeout.connect(self.update_recording_status)
+        
+        # Settings file path for persistent settings
+        self.settings_file = os.path.join(os.path.expanduser("~"), ".radar_analyzer_settings.json")
+        
+        # Setup the UI
         self.setup_ui()
     
     def setup_ui(self):
@@ -143,7 +203,7 @@ class ControlPanel(QWidget):
         self.create_data_collection_controls(main_layout)
         self.create_rosbag_controls(main_layout)
         self.create_pointcloud_controls(main_layout)
-        self.create_heatmap_controls(main_layout)
+        # Heatmap controls removed from UI
         self.create_analysis_controls(main_layout)
         
         # Add status bar at the bottom
@@ -168,20 +228,32 @@ class ControlPanel(QWidget):
                     self.rosbag_group.setTitle("ROS2 Bag Controls - Recording")
                     if hasattr(self, 'recording_status_label'):
                         self.recording_status_label.setText("Recording in Progress")
-                        self.recording_status_label.setStyleSheet("font-weight: bold; color: #F44336;")
                 elif hasattr(analyzer, 'is_playing') and analyzer.is_playing:
                     self.rosbag_group.setTitle("ROS2 Bag Controls - Playing")
                 else:
                     self.rosbag_group.setTitle("ROS2 Bag Controls")
                     if hasattr(self, 'recording_status_label'):
                         self.recording_status_label.setText("Record Settings")
-                        self.recording_status_label.setStyleSheet("font-weight: bold; color: #757575;")
             else:
                 # No analyzer or not initialized yet, set default state
                 self.rosbag_group.setTitle("ROS2 Bag Controls")
                 if hasattr(self, 'recording_status_label'):
                     self.recording_status_label.setText("Record Settings")
-                    self.recording_status_label.setStyleSheet("font-weight: bold; color: #757575;")
+                    
+        # Initialize trail and density coloring checkboxes
+        if hasattr(self, 'trail_visibility_checkbox'):
+            self.trail_visibility_checkbox.setChecked(False)  # Start with trail off
+        if hasattr(self, 'density_coloring_checkbox'):
+            self.density_coloring_checkbox.setChecked(False)  # Start with density coloring off
+        
+        # Set initial state of start/stop buttons
+        if hasattr(self, 'start_button'):
+            self.start_button.setEnabled(True)
+        if hasattr(self, 'stop_button'):
+            self.stop_button.setEnabled(False)
+        
+        # Update plot title with initial config values
+        self.update_plot_config_name()
     
     def create_scatter_controls(self, parent_layout):
         """
@@ -199,13 +271,12 @@ class ControlPanel(QWidget):
         # Circle selection tabs - modern tab design
         self.circle_tabs = QTabWidget()
         self.circle_tabs.setMaximumHeight(200)  # Provide enough space for properly spaced controls
-        self.circle_tabs.setStyleSheet("QTabBar::tab { height: 30px; min-width: 80px; }")
         
         # Create a tab for each circle - applying consistency principle
         circle_configs = [
-            {'name': 'Primary', 'color': 'lime', 'distance': 5, 'angle': 0, 'enabled': True},
-            {'name': 'Left', 'color': 'cyan', 'distance': 15, 'angle': -60, 'enabled': False},
-            {'name': 'Right', 'color': 'yellow', 'distance': 25, 'angle': 60, 'enabled': False}
+            {'name': 'Primary', 'color': 'lime', 'distance': 5.0, 'angle': 0.0, 'enabled': True},
+            {'name': 'Left', 'color': 'cyan', 'distance': 5.0, 'angle': -28.0, 'enabled': False},
+            {'name': 'Right', 'color': 'yellow', 'distance': 5.0, 'angle': 28.0, 'enabled': False}
         ]
         
         self.circle_controls = []
@@ -221,16 +292,18 @@ class ControlPanel(QWidget):
             # Circle enable checkbox - made more prominent
             enable_check = QCheckBox("Enable")
             enable_check.setChecked(config['enabled'])
-            enable_check.setStyleSheet("QCheckBox { font-weight: bold; }")
             enable_check.stateChanged.connect(lambda state, idx=i: self.on_circle_toggle(idx, state))
             tab_layout.addWidget(enable_check, 0, 0, 1, 2)  # Span across both columns
             
             # Distance control - more intuitive labeling and layout
             dist_label = QLabel("Distance:")
             dist_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            distance_spin = QSpinBox()
-            distance_spin.setRange(1, 35)
-            distance_spin.setValue(config['distance'])
+            # Use QDoubleSpinBox for floating point distance
+            distance_spin = QDoubleSpinBox()
+            distance_spin.setRange(1.0, 35.0)
+            distance_spin.setValue(float(config['distance']))
+            distance_spin.setDecimals(1)
+            distance_spin.setSingleStep(0.1)
             distance_spin.setSuffix(" m")
             distance_spin.setMinimumWidth(100)  # Wider for better usability
             distance_spin.valueChanged.connect(lambda value, idx=i: self.on_circle_distance_changed(idx, value))
@@ -256,9 +329,12 @@ class ControlPanel(QWidget):
             
             # Angle control
             angle_label = QLabel("Angle:")
-            angle_spin = QSpinBox()
-            angle_spin.setRange(-90, 90)
-            angle_spin.setValue(config['angle'])
+            # Use QDoubleSpinBox for floating point angle
+            angle_spin = QDoubleSpinBox()
+            angle_spin.setRange(-90.0, 90.0)
+            angle_spin.setValue(float(config['angle']))
+            angle_spin.setDecimals(1)
+            angle_spin.setSingleStep(0.5)
             angle_spin.setSuffix("°")
             angle_spin.setMinimumWidth(80)  # Ensure enough width
             angle_spin.valueChanged.connect(lambda value, idx=i: self.on_circle_angle_changed(idx, value))
@@ -301,6 +377,65 @@ class ControlPanel(QWidget):
         
         scatter_layout.addLayout(global_controls)
         
+        # Add trail controls section - grouped together with better styling
+        trail_group = QGroupBox("Trail Visualization")
+        
+        trail_group_layout = QVBoxLayout(trail_group)
+        trail_group_layout.setContentsMargins(15, 20, 15, 15)
+        trail_group_layout.setSpacing(12)
+        
+        # Checkbox controls for trail visibility and density coloring
+        checkboxes_layout = QVBoxLayout()
+        checkboxes_layout.setSpacing(10)
+        
+        # Show Fading Trail checkbox
+        self.trail_visibility_checkbox = QCheckBox("Show Fading Trail")
+        self.trail_visibility_checkbox.setChecked(True)
+        # Connect the checkbox to toggle_trail signal which will be handled in the main window
+        self.trail_visibility_checkbox.toggled.connect(self.on_trail_visibility_changed)
+        checkboxes_layout.addWidget(self.trail_visibility_checkbox)
+        
+        # Enhanced Density Coloring checkbox
+        self.density_coloring_checkbox = QCheckBox("Enhanced Density Coloring")
+        self.density_coloring_checkbox.setChecked(True)
+        self.density_coloring_checkbox.setToolTip("Use advanced density calculation - red areas show high point concentration")
+        # This checkbox will be connected to the scatter view in the main window
+        checkboxes_layout.addWidget(self.density_coloring_checkbox)
+        
+        trail_group_layout.addLayout(checkboxes_layout)
+        
+        # Add separator between checkboxes and slider
+        separator = QFrame()
+        separator.setFrameShape(QFrame.HLine)
+        separator.setFrameShadow(QFrame.Sunken)
+        trail_group_layout.addWidget(separator)
+        
+        # Trail duration slider with better styling
+        duration_header = QLabel("Trail Duration")
+        trail_group_layout.addWidget(duration_header)
+        
+        slider_layout = QHBoxLayout()
+        slider_layout.setSpacing(10)
+        
+        self.trail_duration_slider = QSlider(Qt.Horizontal)
+        self.trail_duration_slider.setRange(10, 600)  # 1-60 seconds (x10 for precision)
+        self.trail_duration_slider.setValue(200)  # Default 20 seconds
+        self.trail_duration_slider.setTickInterval(100)
+        self.trail_duration_slider.setTickPosition(QSlider.TicksBelow)
+        self.trail_duration_slider.valueChanged.connect(self.on_trail_duration_changed)
+        
+        self.trail_duration_label = QLabel("20.0s")
+        self.trail_duration_label.setMinimumWidth(60)
+        self.trail_duration_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        
+        slider_layout.addWidget(self.trail_duration_slider)
+        slider_layout.addWidget(self.trail_duration_label)
+        
+        trail_group_layout.addLayout(slider_layout)
+        
+        # Add the trail group to the main layout
+        scatter_layout.addWidget(trail_group)
+        
         # Add group to parent layout
         parent_layout.addWidget(scatter_group)
     
@@ -331,243 +466,112 @@ class ControlPanel(QWidget):
             parent_layout: Parent layout to add widgets to.
         """
         collection_group = QGroupBox("Data Collection")
-        collection_group.setStyleSheet("QGroupBox { font-weight: bold; }")
         collection_layout = QHBoxLayout(collection_group)
         collection_layout.setContentsMargins(15, 20, 15, 15)  # More generous margins
         collection_layout.setSpacing(15)  # Better spacing between elements
         
         # Config and target distance controls with improved section header
         params_group = QGroupBox("Configuration")
-        params_group.setStyleSheet("""
-            QGroupBox { 
-                font-weight: bold; 
-                color: #2196F3;
-                border: 1px solid #E0E0E0;
-                border-radius: 4px;
-                margin-top: 1ex;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px;
-            }
-        """)
         
         params_layout = QFormLayout(params_group)
         params_layout.setSpacing(10)  # Increase spacing between form rows
         params_layout.setContentsMargins(15, 20, 15, 15)
         params_layout.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
         
+        # Add Preset Configurations Dropdown
+        self.preset_combo = QComboBox()
+        self.preset_combo.setMinimumHeight(30)
+        self.preset_combo.addItems(["<Load Preset>"] + list(PREDEFINED_CONFIGS.keys()))
+        self.preset_combo.currentIndexChanged.connect(self.load_preset_config)
+        preset_label = QLabel("Preset:")
+        params_layout.addRow(preset_label, self.preset_combo)
+        
+        # Add Hardware Config Dropdown
+        self.hw_config_combo = QComboBox()
+        self.hw_config_combo.setMinimumHeight(30)
+        self.hw_config_combo.addItems(["<Select HW Config>"] + HARDWARE_CONFIG_FILES)
+        self.hw_config_combo.currentIndexChanged.connect(self.on_hardware_config_selected)
+        hw_config_label = QLabel("HW Config:")
+        params_layout.addRow(hw_config_label, self.hw_config_combo)
+        
         # Better input styling for config entry
         self.config_entry = QLineEdit("default_config")
-        self.config_entry.setMinimumHeight(30)
-        self.config_entry.setStyleSheet("""
-            QLineEdit {
-                border: 1px solid #BDBDBD;
-                border-radius: 4px;
-                padding: 4px 8px;
-                background-color: #FFFFFF;
-                color: #212121;
-                font-weight: bold;
-            }
-            QLineEdit:focus {
-                border: 2px solid #2196F3;
-            }
-        """)
-        config_label = QLabel("Config:")
-        config_label.setStyleSheet("font-weight: bold;")
+        config_label = QLabel("Config Name:")
         params_layout.addRow(config_label, self.config_entry)
+        
+        # Connect config entry changes to update plot title
+        self.config_entry.textChanged.connect(self.update_plot_config_name)
         
         # Better styling for target dropdown
         self.target_combo = QComboBox()
-        self.target_combo.addItems([str(d) for d in range(5, 40, 5)])
-        self.target_combo.setCurrentIndex(0)
-        self.target_combo.setMinimumHeight(30)
-        self.target_combo.setStyleSheet("""
-            QComboBox {
-                border: 1px solid #BDBDBD;
-                border-radius: 4px;
-                padding: 4px 8px;
-                background-color: #FFFFFF;
-                color: #212121;
-                font-weight: bold;
-            }
-            QComboBox::drop-down {
-                border: 0px;
-            }
-            QComboBox::down-arrow {
-                image: url(/home/zen/Pictures/Radar_stuff/icons/dropdown.png);
-                width: 12px;
-                height: 12px;
-            }
-            QComboBox QAbstractItemView {
-                border: 1px solid #BDBDBD;
-                background-color: #F5F5F5;
-                color: #212121;
-                selection-background-color: #E0E0E0;
-                selection-color: #212121;
-                padding: 2px;
-            }
-        """)
+        # Restore items and default selection
+        # Ensure the items cover the range needed by presets (up to 25m)
+        self.target_combo.addItems([str(float(d)) for d in range(5, 30, 5)]) # 5.0, 10.0, ..., 25.0
+        self.target_combo.setCurrentIndex(0) # Default to 5.0m
+        self.target_combo.setMinimumHeight(30) # Restore minimum height
         target_label = QLabel("Target Distance:")
-        target_label.setStyleSheet("font-weight: bold;")
         params_layout.addRow(target_label, self.target_combo)
+        
+        # Connect target distance changes to update plot title
+        self.target_combo.currentTextChanged.connect(self.update_plot_config_name)
         
         # Better styling for duration spinner
         self.duration_spin = QSpinBox()
+        # Restore range, value, suffix, and minimum height
         self.duration_spin.setRange(10, 300)
-        self.duration_spin.setValue(60)
+        self.duration_spin.setValue(30) # Changed default duration to 30s
         self.duration_spin.setSuffix(" s")
         self.duration_spin.setMinimumHeight(30)
-        self.duration_spin.setStyleSheet("""
-            QSpinBox {
-                border: 1px solid #BDBDBD;
-                border-radius: 4px;
-                padding: 4px 8px;
-                background-color: #FFFFFF;
-                color: #212121;
-                font-weight: bold;
-            }
-            QSpinBox::up-button, QSpinBox::down-button {
-                border-radius: 2px;
-                background-color: #E0E0E0;
-                width: 16px;
-            }
-            QSpinBox::up-button:hover, QSpinBox::down-button:hover {
-                background-color: #BDBDBD;
-            }
-        """)
+        # Connect duration changes to update plot title
+        self.duration_spin.valueChanged.connect(self.update_plot_config_name)
         duration_label = QLabel("Collection Duration:")
-        duration_label.setStyleSheet("font-weight: bold;")
         params_layout.addRow(duration_label, self.duration_spin)
         
         collection_layout.addWidget(params_group)
         
-        # Create a visual separator
-        separator = QFrame()
-        separator.setFrameShape(QFrame.VLine)
-        separator.setFrameShadow(QFrame.Sunken)
-        separator.setStyleSheet("background-color: #E0E0E0;")
-        collection_layout.addWidget(separator)
+        # Add action buttons with better styling
+        actions_group = QGroupBox("Actions")
         
-        # Collection action buttons in a group with improved header
-        action_group = QGroupBox("Actions")
-        action_group.setStyleSheet("""
-            QGroupBox { 
-                font-weight: bold; 
-                color: #2196F3;
-                border: 1px solid #E0E0E0;
-                border-radius: 4px;
-                margin-top: 1ex;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px;
-            }
-        """)
-        
-        buttons_layout = QVBoxLayout(action_group)
-        buttons_layout.setSpacing(12)  # Increased spacing between buttons
-        buttons_layout.setContentsMargins(15, 20, 15, 15)
+        # Remove the "Add method" comment which was added mistakenly
+        actions_layout = QVBoxLayout(actions_group)
+        actions_layout.setContentsMargins(15, 20, 15, 15)
+        actions_layout.setSpacing(12)  # Better spacing between buttons
         
         # More prominent, better styled action buttons
-        button_style = """
-            QPushButton {
-                background-color: #F5F5F5;
-                border: 1px solid #BDBDBD;
-                border-radius: 4px;
-                color: #424242;
-                font-weight: bold;
-                padding: 8px;
-                text-align: left;
-                min-height: 40px;
-            }
-            QPushButton:hover {
-                background-color: #EEEEEE;
-                border: 1px solid #9E9E9E;
-            }
-            QPushButton:disabled {
-                background-color: #F5F5F5;
-                border: 1px solid #E0E0E0;
-                color: #9E9E9E;
-            }
-        """
-        
         self.start_button = QPushButton("  Start Collection")
-        self.start_button.setIcon(QIcon("/home/zen/Pictures/Radar_stuff/icons/start.png"))
+        self.start_button.setObjectName("primary") # Added object name
+        self.start_button.setIcon(QIcon(":/icons/start.png")) # Updated icon path
         self.start_button.setIconSize(QSize(24, 24))
         self.start_button.setCursor(Qt.PointingHandCursor)
-        self.start_button.setStyleSheet(button_style + """
-            QPushButton {
-                background-color: #4CAF50;
-                color: white;
-            }
-            QPushButton:hover {
-                background-color: #388E3C;
-            }
-        """)
         self.start_button.clicked.connect(self.on_start_collection)
-        buttons_layout.addWidget(self.start_button)
+        actions_layout.addWidget(self.start_button)
         
         self.stop_button = QPushButton("  Stop Collection")
-        self.stop_button.setIcon(QIcon("/home/zen/Pictures/Radar_stuff/icons/stop.png"))
+        self.stop_button.setObjectName("danger") # Added object name
+        self.stop_button.setIcon(QIcon(":/icons/stop.png")) # Updated icon path
         self.stop_button.setIconSize(QSize(24, 24))
         self.stop_button.setCursor(Qt.PointingHandCursor)
-        self.stop_button.setStyleSheet(button_style + """
-            QPushButton {
-                background-color: #F44336;
-                color: white;
-            }
-            QPushButton:hover {
-                background-color: #D32F2F;
-            }
-        """)
         self.stop_button.clicked.connect(self.on_stop_collection)
         self.stop_button.setEnabled(False)
-        buttons_layout.addWidget(self.stop_button)
+        actions_layout.addWidget(self.stop_button)
         
         self.report_button = QPushButton("  Generate Report")
-        self.report_button.setIcon(QIcon("/home/zen/Pictures/Radar_stuff/icons/report.png"))
+        self.report_button.setIcon(QIcon(":/icons/report.png")) # Updated icon path
         self.report_button.setIconSize(QSize(24, 24))
         self.report_button.setCursor(Qt.PointingHandCursor)
-        self.report_button.setStyleSheet(button_style + """
-            QPushButton {
-                background-color: #2196F3;
-                color: white;
-            }
-            QPushButton:hover {
-                background-color: #1976D2;
-            }
-        """)
         self.report_button.clicked.connect(self.on_generate_report)
-        buttons_layout.addWidget(self.report_button)
+        actions_layout.addWidget(self.report_button)
         
-        collection_layout.addWidget(action_group)
+        collection_layout.addWidget(actions_group)
         
         # Create another visual separator
         separator2 = QFrame()
         separator2.setFrameShape(QFrame.VLine)
         separator2.setFrameShadow(QFrame.Sunken)
-        separator2.setStyleSheet("background-color: #E0E0E0;")
         collection_layout.addWidget(separator2)
         
         # Status and progress in a group with improved header
         status_group = QGroupBox("Status")
-        status_group.setStyleSheet("""
-            QGroupBox { 
-                font-weight: bold; 
-                color: #2196F3;
-                border: 1px solid #E0E0E0;
-                border-radius: 4px;
-                margin-top: 1ex;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px;
-            }
-        """)
         
         status_layout = QVBoxLayout(status_group)
         status_layout.setSpacing(10)  # Increased spacing
@@ -578,320 +582,39 @@ class ControlPanel(QWidget):
         status_icon = QLabel()
         status_icon.setObjectName("status_icon")  # Set object name for later reference
         status_pixmap = QPixmap(16, 16)
-        status_pixmap.fill(QColor(76, 175, 80))  # Green color for "Ready"
+        status_pixmap.fill(QColor(76, 175, 80))  # Green color for "Ready" - Keep for now, might need dynamic update
         status_icon.setPixmap(status_pixmap)
         status_hlayout.addWidget(status_icon)
         
         self.status_label = QLabel("Ready")
-        self.status_label.setStyleSheet("""
-            QLabel { 
-                font-weight: bold; 
-                color: #424242;
-                font-size: 14px;
-            }
-        """)
         status_hlayout.addWidget(self.status_label)
         status_hlayout.addStretch()
         status_layout.addLayout(status_hlayout)
         
         # Modern progress bar
         progress_label = QLabel("Collection Progress:")
-        progress_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
         status_layout.addWidget(progress_label)
         
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
         self.progress_bar.setMinimumHeight(25)
-        self.progress_bar.setStyleSheet("""
-            QProgressBar {
-                border: 1px solid #BDBDBD;
-                border-radius: 4px;
-                text-align: center;
-                background-color: #F5F5F5;
-                color: #000000;
-                font-weight: bold;
-            }
-            QProgressBar::chunk {
-                background-color: #2196F3;
-                border-radius: 3px;
-            }
-        """)
         status_layout.addWidget(self.progress_bar)
         
         # Collection Stats
         stats_label = QLabel("Collection Stats:")
-        stats_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
         status_layout.addWidget(stats_label)
         
         self.points_collected_label = QLabel("Density: 0 pts/frame")
-        self.points_collected_label.setStyleSheet("font-family: monospace;")
         status_layout.addWidget(self.points_collected_label)
         
         self.collection_time_label = QLabel("Time: 00:00")
-        self.collection_time_label.setStyleSheet("font-family: monospace;")
         status_layout.addWidget(self.collection_time_label)
         
         collection_layout.addWidget(status_group)
         
         # Add to parent layout with spacing
         parent_layout.addWidget(collection_group)
-        parent_layout.addSpacing(15)  # Space before next section
-    
-    def create_heatmap_controls(self, parent_layout):
-        """
-        Create the heatmap control section.
-        
-        Args:
-            parent_layout: Parent layout to add widgets to.
-        """
-        heatmap_group = QGroupBox("Heatmap Controls")
-        heatmap_group.setStyleSheet("QGroupBox { font-weight: bold; }")
-        heatmap_layout = QHBoxLayout(heatmap_group)
-        heatmap_layout.setContentsMargins(15, 20, 15, 15)  # More generous margins
-        
-        # Reset and visualization controls - with improved section header
-        controls_layout = QVBoxLayout()
-        controls_layout.setSpacing(12)  # Increased spacing for better readability
-        
-        # Add control parameters header
-        controls_header = QLabel("Display Settings")
-        controls_header.setStyleSheet("font-weight: bold; color: #2196F3;")
-        controls_header.setAlignment(Qt.AlignLeft)
-        controls_layout.addWidget(controls_header)
-        controls_layout.addSpacing(5)  # Spacer after header
-        
-        # Colormap and reset controls - improved layout
-        reset_layout = QHBoxLayout()
-        reset_layout.setSpacing(10)
-        
-        # More prominent reset button
-        self.reset_button = QPushButton("Reset")
-        self.reset_button.setIcon(QIcon("/home/zen/Pictures/Radar_stuff/icons/reset.png"))
-        self.reset_button.setIconSize(QSize(24, 24))
-        self.reset_button.setMinimumHeight(30)
-        self.reset_button.setCursor(Qt.PointingHandCursor)
-        self.reset_button.setStyleSheet("""
-            QPushButton {
-                background-color: #FF9800;
-                color: white;
-                font-weight: bold;
-                border-radius: 4px;
-                padding: 4px 10px;
-            }
-            QPushButton:hover {
-                background-color: #F57C00;
-            }
-        """)
-        self.reset_button.clicked.connect(self.on_reset_heatmap)
-        reset_layout.addWidget(self.reset_button)
-        
-        # Better labeled color map selector
-        map_label = QLabel("Color Map:")
-        map_label.setStyleSheet("font-weight: bold;")
-        reset_layout.addWidget(map_label)
-        
-        self.colormap_combo = QComboBox()
-        self.colormap_combo.addItems(["viridis", "plasma", "inferno", "magma", "jet"])
-        self.colormap_combo.setCurrentIndex(0)
-        self.colormap_combo.setMinimumHeight(30)
-        self.colormap_combo.setMinimumWidth(100)
-        self.colormap_combo.setStyleSheet("QComboBox { padding: 4px; }")
-        self.colormap_combo.currentTextChanged.connect(self.on_colormap_changed)
-        reset_layout.addWidget(self.colormap_combo)
-        
-        controls_layout.addLayout(reset_layout)
-        
-        # Decay factor controls - improved with better feedback
-        decay_layout = QHBoxLayout()
-        decay_layout.setSpacing(8)
-        
-        decay_label = QLabel("Decay:")
-        decay_label.setStyleSheet("font-weight: bold;")
-        decay_label.setMinimumWidth(50)
-        decay_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        decay_layout.addWidget(decay_label)
-        
-        self.decay_slider = QSlider(Qt.Horizontal)
-        self.decay_slider.setRange(800, 999)  # 0.8 to 0.999 (scale by 1000)
-        self.decay_slider.setValue(980)       # 0.98 default
-        self.decay_slider.setMinimumHeight(20)
-        self.decay_slider.setStyleSheet("""
-            QSlider::groove:horizontal {
-                height: 6px;
-                background: #E0E0E0;
-                margin: 2px 0;
-                border-radius: 3px;
-            }
-            QSlider::handle:horizontal {
-                background: #2196F3;
-                width: 14px;
-                height: 14px;
-                margin: -4px 0;
-                border-radius: 7px;
-            }
-        """)
-        self.decay_slider.valueChanged.connect(self.on_decay_changed)
-        decay_layout.addWidget(self.decay_slider)
-        
-        self.decay_value = QLabel("0.980")
-        self.decay_value.setStyleSheet("color: #2196F3; font-family: monospace;")
-        self.decay_value.setMinimumWidth(50)  # Ensure consistent width
-        decay_layout.addWidget(self.decay_value)
-        
-        controls_layout.addLayout(decay_layout)
-        
-        heatmap_layout.addLayout(controls_layout)
-        
-        # Visualization mode controls - improved with visual section header
-        mode_layout = QVBoxLayout()
-        mode_layout.setSpacing(10)
-        
-        # Add mode header
-        mode_header = QLabel("Display Mode")
-        mode_header.setStyleSheet("font-weight: bold; color: #2196F3;")
-        mode_header.setAlignment(Qt.AlignLeft)
-        mode_layout.addWidget(mode_header)
-        mode_layout.addSpacing(5)  # Spacer after header
-        
-        self.vis_mode_group = QButtonGroup(self)
-        
-        # Better styled radio buttons
-        radio_style = "QRadioButton { min-height: 25px; }"
-        
-        heat_radio = QRadioButton("Heat")
-        heat_radio.setChecked(True)
-        heat_radio.setStyleSheet(radio_style)
-        heat_radio.setCursor(Qt.PointingHandCursor)
-        heat_radio.toggled.connect(lambda checked: checked and self.on_vis_mode_changed("heatmap"))
-        self.vis_mode_group.addButton(heat_radio)
-        mode_layout.addWidget(heat_radio)
-        
-        contour_radio = QRadioButton("Contour")
-        contour_radio.setStyleSheet(radio_style)
-        contour_radio.setCursor(Qt.PointingHandCursor)
-        contour_radio.toggled.connect(lambda checked: checked and self.on_vis_mode_changed("contour"))
-        self.vis_mode_group.addButton(contour_radio)
-        mode_layout.addWidget(contour_radio)
-        
-        combined_radio = QRadioButton("Combined")
-        combined_radio.setStyleSheet(radio_style)
-        combined_radio.setCursor(Qt.PointingHandCursor)
-        combined_radio.toggled.connect(lambda checked: checked and self.on_vis_mode_changed("combined"))
-        self.vis_mode_group.addButton(combined_radio)
-        mode_layout.addWidget(combined_radio)
-        
-        heatmap_layout.addLayout(mode_layout)
-        
-        # Noise and smoothing controls - with improved section header
-        params_layout = QVBoxLayout()
-        params_layout.setSpacing(12)
-        
-        # Add parameters header
-        params_header = QLabel("Parameters")
-        params_header.setStyleSheet("font-weight: bold; color: #2196F3;")
-        params_header.setAlignment(Qt.AlignLeft)
-        params_layout.addWidget(params_header)
-        params_layout.addSpacing(5)  # Spacer after header
-        
-        # Noise floor control - improved with better visual feedback
-        noise_layout = QHBoxLayout()
-        noise_layout.setSpacing(8)
-        
-        noise_label = QLabel("Noise:")
-        noise_label.setStyleSheet("font-weight: bold;")
-        noise_label.setMinimumWidth(50)
-        noise_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        noise_layout.addWidget(noise_label)
-        
-        self.noise_slider = QSlider(Qt.Horizontal)
-        self.noise_slider.setRange(1, 20)  # 0.01 to 0.2 (scale by 100)
-        self.noise_slider.setValue(5)      # 0.05 default
-        self.noise_slider.setMinimumHeight(20)
-        self.noise_slider.setStyleSheet("""
-            QSlider::groove:horizontal {
-                height: 6px;
-                background: #E0E0E0;
-                margin: 2px 0;
-                border-radius: 3px;
-            }
-            QSlider::handle:horizontal {
-                background: #2196F3;
-                width: 14px;
-                height: 14px;
-                margin: -4px 0;
-                border-radius: 7px;
-            }
-        """)
-        self.noise_slider.valueChanged.connect(self.on_noise_changed)
-        noise_layout.addWidget(self.noise_slider)
-        
-        self.noise_value = QLabel("0.05")
-        self.noise_value.setStyleSheet("color: #2196F3; font-family: monospace;")
-        self.noise_value.setMinimumWidth(50)  # Ensure consistent width
-        noise_layout.addWidget(self.noise_value)
-        
-        params_layout.addLayout(noise_layout)
-        
-        # Smoothing control - improved with consistent styling
-        smooth_layout = QHBoxLayout()
-        smooth_layout.setSpacing(8)
-        
-        smooth_label = QLabel("Smooth:")
-        smooth_label.setStyleSheet("font-weight: bold;")
-        smooth_label.setMinimumWidth(50)
-        smooth_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        smooth_layout.addWidget(smooth_label)
-        
-        self.smooth_slider = QSlider(Qt.Horizontal)
-        self.smooth_slider.setRange(5, 50)  # 0.5 to 5.0 (scale by 10)
-        self.smooth_slider.setValue(20)     # 2.0 default
-        self.smooth_slider.setMinimumHeight(20)
-        self.smooth_slider.setStyleSheet("""
-            QSlider::groove:horizontal {
-                height: 6px;
-                background: #E0E0E0;
-                margin: 2px 0;
-                border-radius: 3px;
-            }
-            QSlider::handle:horizontal {
-                background: #2196F3;
-                width: 14px;
-                height: 14px;
-                margin: -4px 0;
-                border-radius: 7px;
-            }
-        """)
-        self.smooth_slider.valueChanged.connect(self.on_smoothing_changed)
-        smooth_layout.addWidget(self.smooth_slider)
-        
-        self.smooth_value = QLabel("2.0")
-        self.smooth_value.setStyleSheet("color: #2196F3; font-family: monospace;")
-        self.smooth_value.setMinimumWidth(50)  # Ensure consistent width
-        smooth_layout.addWidget(self.smooth_value)
-        
-        params_layout.addLayout(smooth_layout)
-        
-        # Add vertical separator between sections
-        separator1 = QFrame()
-        separator1.setFrameShape(QFrame.VLine)
-        separator1.setFrameShadow(QFrame.Sunken)
-        separator1.setStyleSheet("background-color: #E0E0E0;")
-        
-        separator2 = QFrame()
-        separator2.setFrameShape(QFrame.VLine)
-        separator2.setFrameShadow(QFrame.Sunken)
-        separator2.setStyleSheet("background-color: #E0E0E0;")
-        
-        # Add all layouts with proper separators and spacing
-        heatmap_layout.addLayout(controls_layout, 1)
-        heatmap_layout.addWidget(separator1)
-        heatmap_layout.addLayout(mode_layout, 1)
-        heatmap_layout.addWidget(separator2)
-        heatmap_layout.addLayout(params_layout, 1)
-        
-        # Add to parent layout with spacing
-        parent_layout.addWidget(heatmap_group)
         parent_layout.addSpacing(15)  # Space before next section
     
     def create_rosbag_controls(self, parent_layout):
@@ -902,7 +625,6 @@ class ControlPanel(QWidget):
             parent_layout: Parent layout to add widgets to.
         """
         self.rosbag_group = QGroupBox("ROS2 Bag Controls")
-        self.rosbag_group.setStyleSheet("QGroupBox { font-weight: bold; }")
         rosbag_layout = QHBoxLayout(self.rosbag_group)
         rosbag_layout.setContentsMargins(15, 20, 15, 15)  # More generous margins
         
@@ -915,7 +637,6 @@ class ControlPanel(QWidget):
         
         # Add playback header
         playback_header = QLabel("Playback")
-        playback_header.setStyleSheet("font-weight: bold; color: #2196F3;")
         playback_header.setAlignment(Qt.AlignLeft)
         playback_layout.addWidget(playback_header)
         
@@ -928,24 +649,15 @@ class ControlPanel(QWidget):
         self.bag_path_edit.setToolTip("Path to ROS2 bag file for playback")
         self.bag_path_edit.setMinimumHeight(28)  # Slightly taller for better touch targets
         
-        # Discover button to find available ROS2 bags
-        refresh_button = QPushButton()
-        refresh_button.setIcon(QIcon.fromTheme("view-refresh"))
-        refresh_button.setToolTip("Discover ROS2 bags in common directories")
-        refresh_button.setMinimumHeight(28)
-        refresh_button.setMaximumWidth(32)
-        refresh_button.setCursor(Qt.PointingHandCursor)
-        refresh_button.clicked.connect(self.discover_rosbags)
-        
-        bag_select_button = QPushButton("Browse")
-        bag_select_button.setMinimumHeight(28)
-        bag_select_button.setCursor(Qt.PointingHandCursor)  # Change cursor on hover
-        bag_select_button.setIcon(QIcon.fromTheme("folder-open"))
-        bag_select_button.clicked.connect(self.on_select_bagfile)
+        bag_browse_button = QPushButton()
+        bag_browse_button.setIcon(QIcon.fromTheme("document-open")) # Use theme icon
+        bag_browse_button.setCursor(Qt.PointingHandCursor)
+        bag_browse_button.setToolTip("Browse for ROS2 bag file")
+        bag_browse_button.clicked.connect(self.on_select_bagfile)
         
         bag_select_layout.addWidget(self.bag_path_edit, 5)  # Proportional sizing
-        bag_select_layout.addWidget(refresh_button, 1)      # Refresh button
-        bag_select_layout.addWidget(bag_select_button, 2)   # Browse button
+        bag_select_layout.addWidget(bag_browse_button, 1)      # Refresh button
+        bag_select_layout.addWidget(bag_browse_button, 2)   # Browse button
         
         playback_layout.addLayout(bag_select_layout)
         playback_layout.addSpacing(8)  # Add spacing between sections
@@ -956,16 +668,16 @@ class ControlPanel(QWidget):
         
         # Timeline header with clearer labeling
         timeline_header = QHBoxLayout()
-        timeline_label = QLabel("Timeline:")
-        timeline_label.setStyleSheet("font-weight: bold;")
-        timeline_header.addWidget(timeline_label)
-        timeline_header.addStretch(1)
-        
+        # Restore static "Timeline:" label and dynamic timestamp label
+        static_timeline_label = QLabel("Timeline:")
+        timeline_header.addWidget(static_timeline_label)
+        timeline_header.addStretch(1) # Add stretch to push timestamp to the right
         self.timestamp_label = QLabel("00:00 / 00:00")
-        self.timestamp_label.setMinimumWidth(100)  # Ensure enough space for timestamp
-        self.timestamp_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)  # Right aligned
-        self.timestamp_label.setStyleSheet("color: #4285F4; font-family: monospace;")
+        self.timestamp_label.setMinimumWidth(120)  # Ensure enough space for timestamp
+        self.timestamp_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         timeline_header.addWidget(self.timestamp_label)
+        # Remove the incorrect addition of the static label directly to timeline_layout
+        # timeline_layout.addWidget(timeline_label)
         timeline_layout.addLayout(timeline_header)
         
         # Timeline slider with better visual feedback
@@ -981,72 +693,124 @@ class ControlPanel(QWidget):
                 self.setSingleStep(1)  # Smaller single step for finer control
                 # Track whether we're currently updating to avoid feedback loops
                 self.is_programmatic_update = False
-                
+
             def mousePressEvent(self, event):
-                if self.parent_panel:
-                    self.parent_panel.timeline_dragging = True
+                # Handle clicks/drags on the groove or handle to jump to position
+                if event.button() == Qt.LeftButton:
+                    opt = QStyleOptionSlider()
+                    self.initStyleOption(opt)
+                    # Calculate the value corresponding to the click/press position
+                    if self.orientation() == Qt.Horizontal:
+                        slider_length = self.width()
+                        slider_pos = event.pos().x()
+                    else:
+                        slider_length = self.height()
+                        slider_pos = event.pos().y()
+
+                    value = QStyle.sliderValueFromPosition(self.minimum(), self.maximum(), slider_pos, slider_length, opt.upsideDown)
+
+                    # Set the slider value visually immediately *without* emitting valueChanged
+                    self.blockSignals(True)
+                    self.setValue(value)
+                    self.blockSignals(False)
+
+                    # Update timestamp label immediately for responsiveness
+                    if self.parent_panel:
+                        self.parent_panel.timeline_dragging = True
+                        position = value / 1000.0 # Normalize
+                        self.parent_panel._update_timestamp_label(position)
+
+                    # Allow the event to propagate for default handle dragging behavior start
+                    # but we handle the visual update ourselves in mouseMoveEvent
+                    # super().mousePressEvent(event) # Let default handle press logic run if needed, but visual update is manual
+                    event.accept() # Accept the event, indicating we handled it
+                    return
+
+                # For other buttons, use default behavior
                 super().mousePressEvent(event)
-            
+
+            def mouseMoveEvent(self, event):
+                # Live update while dragging
+                if self.parent_panel and self.parent_panel.timeline_dragging:
+                    opt = QStyleOptionSlider()
+                    self.initStyleOption(opt)
+                    if self.orientation() == Qt.Horizontal:
+                        slider_length = self.width()
+                        slider_pos = event.pos().x()
+                    else:
+                        slider_length = self.height()
+                        slider_pos = event.pos().y()
+
+                    value = QStyle.sliderValueFromPosition(self.minimum(), self.maximum(), slider_pos, slider_length, opt.upsideDown)
+
+                    # Update slider visually without emitting signal
+                    self.blockSignals(True)
+                    self.setValue(value)
+                    self.blockSignals(False)
+
+                    # Update timestamp label live
+                    position = value / 1000.0
+                    self.parent_panel._update_timestamp_label(position)
+                    event.accept()
+                    return
+
+                super().mouseMoveEvent(event)
+
             def mouseReleaseEvent(self, event):
-                if self.parent_panel:
-                    # Delay setting dragging to False to avoid immediate overwrite by signal
-                    QTimer.singleShot(150, lambda: setattr(self.parent_panel, 'timeline_dragging', False))
+                if event.button() == Qt.LeftButton and self.parent_panel and self.parent_panel.timeline_dragging:
+                    self.parent_panel.timeline_dragging = False
+
+                    # Get the final value where the mouse was released
+                    # Recalculate value at release point for accuracy
+                    opt = QStyleOptionSlider()
+                    self.initStyleOption(opt)
+                    if self.orientation() == Qt.Horizontal:
+                        slider_length = self.width()
+                        slider_pos = event.pos().x()
+                    else:
+                        slider_length = self.height()
+                        slider_pos = event.pos().y()
+                    value = QStyle.sliderValueFromPosition(self.minimum(), self.maximum(), slider_pos, slider_length, opt.upsideDown)
+
+                    # Ensure slider visually matches final value (without signals)
+                    self.blockSignals(True)
+                    self.setValue(value)
+                    self.blockSignals(False)
+
+                    # Emit the seek signal ONCE with the final position
+                    final_position = value / 1000.0
+                    self.parent_panel.timeline_position_changed.emit(final_position)
+                    self.parent_panel._update_timestamp_label(final_position) # Ensure label matches final position
+
+                    event.accept()
+                    return
+
                 super().mouseReleaseEvent(event)
-                
+
             def setValue(self, value):
-                """Override setValue to track programmatic updates."""
-                self.is_programmatic_update = True
+                """Override setValue to respect the programmatic update flag."""
+                # Store the current block state
+                blocked = self.signalsBlocked()
+                if self.is_programmatic_update:
+                    # If it's a programmatic update, block signals before setting value
+                    self.blockSignals(True)
+                # Call the original setValue method
                 super().setValue(value)
-                self.is_programmatic_update = False
+                if self.is_programmatic_update:
+                    # Restore the original signal block state
+                    self.blockSignals(blocked)
         
         self.timeline_slider = TimelineSlider(Qt.Horizontal, self)
         self.timeline_slider.setEnabled(False)  # Initially disabled until bag is loaded
-        self.timeline_slider.setRange(0, 100)
+        self.timeline_slider.setRange(0, 1000) # Use 0-1000 for smoother updates
         self.timeline_slider.setValue(0)
-        self.timeline_slider.setMinimumHeight(24)  # Taller for easier interaction
-        self.timeline_slider.setTickPosition(QSlider.TicksBelow)
-        self.timeline_slider.setTickInterval(10)  # Ticks at 10% intervals
-        self.timeline_slider.setStyleSheet("""
-            QSlider::groove:horizontal {
-                height: 8px;
-                background: #E0E0E0;
-                margin: 2px 0;
-                border-radius: 4px;
-            }
-            QSlider::handle:horizontal {
-                background: #4285F4;
-                width: 16px;
-                height: 16px;
-                margin: -4px 0;
-                border-radius: 8px;
-            }
-        """)
+        self.timeline_slider.setTickPosition(QSlider.NoTicks) # Let stylesheet handle look
         self.timeline_slider.valueChanged.connect(self.on_timeline_changed)
         timeline_layout.addWidget(self.timeline_slider)
         
         # Add "Generate from Bag" checkbox for data collection during playback
         self.generate_from_bag_check = QCheckBox("Generate from bag")
         self.generate_from_bag_check.setEnabled(False)  # Initially disabled until bag is loaded
-        self.generate_from_bag_check.setStyleSheet("""
-            QCheckBox {
-                color: #4CAF50;
-                font-weight: bold;
-                margin-top: 5px;
-            }
-            QCheckBox::indicator {
-                width: 18px;
-                height: 18px;
-            }
-            QCheckBox::indicator:checked {
-                background-color: #4CAF50;
-                border: 2px solid #4CAF50;
-                border-radius: 3px;
-            }
-            QCheckBox::indicator:unchecked {
-                border: 2px solid #BDBDBD;
-                border-radius: 3px;
-            }
-        """)
         self.generate_from_bag_check.setToolTip("Enable to collect data from bag playback")
         self.generate_from_bag_check.stateChanged.connect(self.on_generate_from_bag_changed)
         playback_layout.addWidget(self.generate_from_bag_check)
@@ -1058,48 +822,20 @@ class ControlPanel(QWidget):
         playback_buttons.setSpacing(10)  # More space between buttons
         
         self.play_button = QPushButton("Play")
-        self.play_button.setIcon(QIcon("/home/zen/Pictures/Radar_stuff/icons/playback.png"))
+        self.play_button.setObjectName("primary") # Added object name
+        self.play_button.setIcon(QIcon(":/icons/playback.png")) # Updated icon path
         self.play_button.setIconSize(QSize(24, 24))
         self.play_button.setMinimumHeight(36)  # Taller button for easier interaction
         self.play_button.setCursor(Qt.PointingHandCursor)  # Change cursor on hover
-        self.play_button.setStyleSheet("""
-            QPushButton {
-                background-color: #4CAF50;
-                color: white;
-                font-weight: bold;
-                border-radius: 4px;
-                padding: 5px 15px;
-            }
-            QPushButton:disabled {
-                background-color: #CCCCCC;
-            }
-            QPushButton:hover {
-                background-color: #45a049;
-            }
-        """)
         self.play_button.clicked.connect(self.on_play_rosbag)
         playback_buttons.addWidget(self.play_button)
         
         self.stop_playback_button = QPushButton("Stop")
-        self.stop_playback_button.setIcon(QIcon("/home/zen/Pictures/Radar_stuff/icons/stop.png"))
+        self.stop_playback_button.setObjectName("danger") # Added object name
+        self.stop_playback_button.setIcon(QIcon(":/icons/stop.png")) # Updated icon path
         self.stop_playback_button.setIconSize(QSize(24, 24))
         self.stop_playback_button.setMinimumHeight(36)  # Consistent height
         self.stop_playback_button.setCursor(Qt.PointingHandCursor)  # Change cursor on hover
-        self.stop_playback_button.setStyleSheet("""
-            QPushButton {
-                background-color: #F44336;
-                color: white;
-                font-weight: bold;
-                border-radius: 4px;
-                padding: 5px 15px;
-            }
-            QPushButton:disabled {
-                background-color: #CCCCCC;
-            }
-            QPushButton:hover {
-                background-color: #d32f2f;
-            }
-        """)
         self.stop_playback_button.clicked.connect(self.on_stop_rosbag)
         self.stop_playback_button.setEnabled(False)
         playback_buttons.addWidget(self.stop_playback_button)
@@ -1113,7 +849,6 @@ class ControlPanel(QWidget):
         
         # Add recording header for visual separation - using a status label that will update
         self.recording_status_label = QLabel("Record Settings")
-        self.recording_status_label.setStyleSheet("font-weight: bold; color: #757575;")
         self.recording_status_label.setAlignment(Qt.AlignLeft)
         recording_layout.addWidget(self.recording_status_label)
         
@@ -1129,22 +864,7 @@ class ControlPanel(QWidget):
         record_path_button = QPushButton("Browse")
         record_path_button.setMinimumHeight(28)
         record_path_button.setCursor(Qt.PointingHandCursor)  # Change cursor on hover
-        record_path_button.setIcon(QIcon.fromTheme("folder-open"))
-        record_path_button.setStyleSheet("""
-            QPushButton {
-                background-color: #f0f0f0;
-                border: 1px solid #ccc;
-                border-radius: 4px;
-                padding: 4px 8px;
-            }
-            QPushButton:hover {
-                background-color: #e0e0e0;
-                border: 1px solid #aaa;
-            }
-            QPushButton:pressed {
-                background-color: #d0d0d0;
-            }
-        """)
+        record_path_button.setIcon(QIcon.fromTheme("folder-open")) # Use theme icon
         record_path_button.clicked.connect(self.on_select_record_path)
         
         record_path_layout.addWidget(self.record_path_edit, 3)  # Proportional sizing
@@ -1155,57 +875,18 @@ class ControlPanel(QWidget):
         duration_layout.setSpacing(8)
         
         duration_label = QLabel("Duration:")
-        duration_label.setStyleSheet("font-weight: bold;")
         duration_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        duration_label.setMinimumWidth(50)
-        
-        # Create time unit selection combobox
-        self.duration_unit_combo = QComboBox()
-        self.duration_unit_combo.addItems(["sec", "min"])
-        self.duration_unit_combo.setCurrentIndex(0)  # Default to seconds
-        self.duration_unit_combo.setMaximumWidth(60)
-        self.duration_unit_combo.setStyleSheet("""
-            QComboBox {
-                border: 1px solid #BDBDBD;
-                border-radius: 4px;
-                padding: 2px 5px;
-                background-color: #FFFFFF;
-                color: #212121;
-            }
-            QComboBox QAbstractItemView {
-                border: 1px solid #BDBDBD;
-                background-color: #F5F5F5;
-                color: #212121;
-                selection-background-color: #E0E0E0;
-                selection-color: #212121;
-            }
-        """)
-        self.duration_unit_combo.currentIndexChanged.connect(self.on_duration_unit_changed)
-        
         self.record_duration_spin = QSpinBox()
-        self.record_duration_spin.setRange(0, 3600)  # 0 means no time limit, up to 3600 seconds
-        self.record_duration_spin.setValue(0)
-        self.record_duration_spin.setSpecialValueText("No limit")  # Show "No limit" when value is 0
-        self.record_duration_spin.setToolTip("Recording duration (0 = no time limit)")
+        self.record_duration_spin.setRange(0, 3600 * 24) # 0 to 24 hours in seconds
+        self.record_duration_spin.setValue(0) # Default 0 (unlimited)
+        self.record_duration_spin.setSpecialValueText("No limit")
+        self.record_duration_spin.setToolTip("Set recording duration (0 for unlimited)")
         self.record_duration_spin.setMinimumHeight(28)
-        self.record_duration_spin.setStyleSheet("""
-            QSpinBox {
-                border: 1px solid #BDBDBD;
-                border-radius: 4px;
-                padding: 4px 8px;
-                background-color: #FFFFFF;
-                color: #212121;
-            }
-            QSpinBox::up-button, QSpinBox::down-button {
-                border-radius: 2px;
-                background-color: #E0E0E0;
-                width: 16px;
-            }
-            QSpinBox::up-button:hover, QSpinBox::down-button:hover {
-                background-color: #BDBDBD;
-            }
-        """)
-        self.record_duration_spin.valueChanged.connect(self.on_record_duration_changed)
+        
+        self.duration_unit_combo = QComboBox()
+        self.duration_unit_combo.addItems(["sec", "min", "hr"])
+        self.duration_unit_combo.setMinimumHeight(28)
+        self.duration_unit_combo.currentIndexChanged.connect(self.on_duration_unit_changed)
         
         duration_layout.addWidget(duration_label, 1)
         duration_layout.addWidget(self.record_duration_spin, 3)
@@ -1214,7 +895,6 @@ class ControlPanel(QWidget):
         
         # Add estimated bag size label
         self.bag_size_label = QLabel("Est. size: Unknown (unlimited duration)")
-        self.bag_size_label.setStyleSheet("color: #777777; font-style: italic;")
         self.bag_size_label.setAlignment(Qt.AlignRight)
         recording_layout.addWidget(self.bag_size_label)
         recording_layout.addSpacing(8)
@@ -1224,10 +904,7 @@ class ControlPanel(QWidget):
         topics_layout.setSpacing(8)
         
         topics_label = QLabel("Topics:")
-        topics_label.setStyleSheet("font-weight: bold;")
         topics_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        topics_label.setMinimumWidth(50)  # Ensure consistent alignment with other labels
-        
         self.topics_edit = QLineEdit("/radar/data,/radar/status")
         self.topics_edit.setToolTip("Comma-separated list of ROS2 topics to record")
         self.topics_edit.setMinimumHeight(28)  # Consistent height with other inputs
@@ -1242,48 +919,20 @@ class ControlPanel(QWidget):
         record_buttons.setSpacing(10)  # More space between buttons
         
         self.record_button = QPushButton("Record")
-        self.record_button.setIcon(QIcon("/home/zen/Pictures/Radar_stuff/icons/record.png"))
+        self.record_button.setObjectName("primary") # Added object name
+        self.record_button.setIcon(QIcon(":/icons/record.png")) # Updated icon path
         self.record_button.setIconSize(QSize(24, 24))
         self.record_button.setMinimumHeight(36)  # Taller button for easier interaction
         self.record_button.setCursor(Qt.PointingHandCursor)  # Change cursor on hover
-        self.record_button.setStyleSheet("""
-            QPushButton {
-                background-color: #F44336;
-                color: white;
-                font-weight: bold;
-                border-radius: 4px;
-                padding: 5px 15px;
-            }
-            QPushButton:disabled {
-                background-color: #CCCCCC;
-            }
-            QPushButton:hover {
-                background-color: #d32f2f;
-            }
-        """)
         self.record_button.clicked.connect(self.on_record_rosbag)
         record_buttons.addWidget(self.record_button)
         
         self.stop_record_button = QPushButton("Stop")
-        self.stop_record_button.setIcon(QIcon("/home/zen/Pictures/Radar_stuff/icons/stop.png"))
+        self.stop_record_button.setObjectName("danger") # Added object name
+        self.stop_record_button.setIcon(QIcon(":/icons/stop.png")) # Updated icon path
         self.stop_record_button.setIconSize(QSize(24, 24))
         self.stop_record_button.setMinimumHeight(36)  # Consistent height
         self.stop_record_button.setCursor(Qt.PointingHandCursor)  # Change cursor on hover
-        self.stop_record_button.setStyleSheet("""
-            QPushButton {
-                background-color: #9E9E9E;
-                color: white;
-                font-weight: bold;
-                border-radius: 4px;
-                padding: 5px 15px;
-            }
-            QPushButton:disabled {
-                background-color: #CCCCCC;
-            }
-            QPushButton:hover {
-                background-color: #757575;
-            }
-        """)
         self.stop_record_button.clicked.connect(self.on_stop_rosbag)
         self.stop_record_button.setEnabled(False)
         record_buttons.addWidget(self.stop_record_button)
@@ -1305,26 +954,24 @@ class ControlPanel(QWidget):
             parent_layout: Parent layout to add widgets to.
         """
         pointcloud_group = QGroupBox("Point Cloud Visualization")
-        pointcloud_layout = QHBoxLayout(pointcloud_group)
+        pointcloud_layout = QFormLayout(pointcloud_group)
+        pointcloud_layout.setContentsMargins(15, 20, 15, 15) # More generous margins
+        pointcloud_layout.setSpacing(10) # Increase spacing between form rows
         
         # Point cloud topic selection
         self.pcl_topic_combo = QComboBox()
         self.pcl_topic_combo.addItems(["/radar/pointcloud", "/lidar/points", "/camera/depth/points"])
-        pointcloud_layout.addWidget(QLabel("Topic:"))
-        pointcloud_layout.addWidget(self.pcl_topic_combo)
+        pointcloud_layout.addRow(QLabel("Topic:"), self.pcl_topic_combo)
         
         # Visualization button
         self.pcl_visualize_button = QPushButton("Visualize")
-        self.pcl_visualize_button.setIcon(QIcon("/home/zen/Pictures/Radar_stuff/icons/pointcloud.png"))
-        self.pcl_visualize_button.setIconSize(QSize(24, 24))
         self.pcl_visualize_button.clicked.connect(self.on_visualize_pointcloud)
-        pointcloud_layout.addWidget(self.pcl_visualize_button)
+        pointcloud_layout.addRow(self.pcl_visualize_button)
         
         # Options dropdown for visualization type
         self.pcl_viz_type = QComboBox()
         self.pcl_viz_type.addItems(["Points", "Heatmap", "Surface"])
-        pointcloud_layout.addWidget(QLabel("View:"))
-        pointcloud_layout.addWidget(self.pcl_viz_type)
+        pointcloud_layout.addRow(QLabel("View:"), self.pcl_viz_type)
         
         # Add to parent layout
         parent_layout.addWidget(pointcloud_group)
@@ -1335,11 +982,12 @@ class ControlPanel(QWidget):
         last_dir = self.last_used_directory() or os.path.expanduser("~")
         
         # Create a non-modal file dialog for better UI responsiveness
-        dialog = QFileDialog(self, "Select ROS2 Bag File", last_dir,
-                           "ROS2 Bag Files (*.db3 *.mcap);;All Files (*)")
-        dialog.setFileMode(QFileDialog.ExistingFile)
+        # Allow selecting directories OR .db3 files directly
+        dialog = QFileDialog(self, "Select ROS2 Bag File or Directory", last_dir,
+                           "ROS2 Bags (*.db3 metadata.yaml);;All Files (*)")
+        dialog.setFileMode(QFileDialog.ExistingFile) # Allow selecting files or directories with metadata.yaml
+        dialog.setOption(QFileDialog.DontUseNativeDialog, True)
         dialog.setViewMode(QFileDialog.Detail)
-        dialog.setOptions(QFileDialog.DontUseNativeDialog | QFileDialog.ReadOnly)
         
         # Make the dialog more efficient
         dialog.setMinimumSize(800, 500)  # Larger dialog for better browsing
@@ -1350,6 +998,8 @@ class ControlPanel(QWidget):
                 file_path = selected_files[0]
                 self.bag_path_edit.setText(file_path)
                 self.save_last_used_directory(os.path.dirname(file_path))
+                # Get duration and update UI
+                self._update_bag_info(file_path)
                 return True
         return False
     
@@ -1677,7 +1327,6 @@ class ControlPanel(QWidget):
         # Reset recording status label explicitly
         if hasattr(self, 'recording_status_label'):
             self.recording_status_label.setText("Record Settings")
-            self.recording_status_label.setStyleSheet("font-weight: bold; color: #757575;")
         
         # Check if we should restart the bag playback for data generation
         # Don't restart if collection was manually stopped
@@ -1760,56 +1409,48 @@ class ControlPanel(QWidget):
         """Handle timeline slider value change.
         
         Args:
-            value: Slider position (0-100)
+            value: Slider position (0-1000)
         """
+        # This slot is now primarily for reacting to external/programmatic changes
+        # if needed, or simply updating the label if not handled elsewhere.
+        # The actual seek command is now triggered ONLY on mouse release.
+
         # Convert to normalized position (0.0-1.0)
-        position = value / 100.0
-        
-        # Update timestamp display based on bag duration if available
-        if hasattr(self, 'bag_duration_seconds') and self.bag_duration_seconds > 0:
-            current_time = position * self.bag_duration_seconds
-            self.timestamp_label.setText(f"{current_time:.1f}s / {self.bag_duration_seconds:.1f}s")
-        else:
-            # Fallback to placeholder format
-            minutes = int(position * 60)
-            seconds = int((position * 60 - minutes) * 60)
-            self.timestamp_label.setText(f"{minutes:02d}:{seconds:02d} / 60:00")
-        
-        # Check if slider update is from user interaction (not programmatic)
-        if self.timeline_dragging:
-            # Throttle seek events during dragging by using a timer
-            if not hasattr(self, '_last_seek_time'):
-                self._last_seek_time = 0
-                self._pending_seek_position = None
-                
-            current_time = time.time()
-            elapsed = current_time - self._last_seek_time
-            
-            # Only send a seek event every 100ms during dragging to avoid overwhelming the system
-            if elapsed >= 0.1:  # 100ms
-                self._last_seek_time = current_time
-                self.timeline_position_changed.emit(position)
-                self._pending_seek_position = None
-            else:
-                # Store the position for sending when the timer elapses
-                self._pending_seek_position = position
-                
-                # If we haven't set up a timer yet, set one up to send the final position
-                if not hasattr(self, '_seek_timer'):
-                    self._seek_timer = QTimer()
-                    self._seek_timer.setSingleShot(True)
-                    self._seek_timer.timeout.connect(self._send_pending_seek)
-                
-                # Restart the timer for 100ms
-                self._seek_timer.start(100)
-    
+        position = value / 1000.0
+
+        # Update timestamp display - this might be redundant if _update_timestamp_label
+        # is called correctly after programmatic updates and during dragging.
+        # Keep it for now as a fallback.
+        if not self.timeline_dragging:
+             self._update_timestamp_label(position)
+
+        # REMOVED throttling logic - seek happens on mouse release
+        # if self.timeline_dragging:
+        #     ... (throttling code removed)
+
     def _send_pending_seek(self):
         """Send the pending seek position if available."""
-        if hasattr(self, '_pending_seek_position') and self._pending_seek_position is not None:
-            self.timeline_position_changed.emit(self._pending_seek_position)
-            self._pending_seek_position = None
-            self._last_seek_time = time.time()
-    
+        # This method is likely NO LONGER NEEDED as seek is triggered on mouse release.
+        # Keep it for now in case it's called from elsewhere, but comment out logic.
+        # if hasattr(self, '_pending_seek_position') and self._pending_seek_position is not None:
+        #     self.timeline_position_changed.emit(self._pending_seek_position)
+        #     self._pending_seek_position = None
+        #     self._last_seek_time = time.time()
+        #     # Update label after sending final position
+        #     self._update_timestamp_label(self._pending_seek_position if self._pending_seek_position is not None else self.timeline_slider.value() / 1000.0)
+        pass # No longer sending pending seeks here
+
+    def update_playback_position(self, position):
+        """Update the timeline slider position based on external feedback (e.g., from analyzer node)."""
+        if not self.timeline_dragging:
+            # Set flag to prevent setValue from emitting valueChanged
+            self.timeline_slider.is_programmatic_update = True
+            slider_value = int(position * 1000)
+            self.timeline_slider.setValue(slider_value)
+            self.timeline_slider.is_programmatic_update = False
+            # Explicitly update the label after programmatic change
+            self._update_timestamp_label(position)
+
     def on_visualize_pointcloud(self):
         """Handle visualize point cloud button."""
         topic = self.pcl_topic_combo.currentText()
@@ -1834,85 +1475,32 @@ class ControlPanel(QWidget):
         """
         analysis_group = QGroupBox("Analysis Controls")
         analysis_layout = QVBoxLayout(analysis_group)
-        
-        # Action buttons in horizontal layout
-        buttons_layout = QHBoxLayout()
-        
-        self.save_heatmap_button = QPushButton("Save Heatmap")
-        self.save_heatmap_button.setIcon(QIcon("/home/zen/Pictures/Radar_stuff/icons/save.png"))
-        self.save_heatmap_button.setIconSize(QSize(24, 24))
-        self.save_heatmap_button.clicked.connect(lambda: self.save_heatmap.emit())
-        buttons_layout.addWidget(self.save_heatmap_button)
-        
-        self.export_plot_button = QPushButton("Export Plot")
-        self.export_plot_button.setIcon(QIcon("/home/zen/Pictures/Radar_stuff/icons/export.png"))
-        self.export_plot_button.setIconSize(QSize(24, 24))
-        self.export_plot_button.clicked.connect(self.on_export_plot)
-        buttons_layout.addWidget(self.export_plot_button)
-        
-        self.add_roi_button = QPushButton("Add ROI")
-        self.add_roi_button.setIcon(QIcon("/home/zen/Pictures/Radar_stuff/icons/add_roi.png"))
-        self.add_roi_button.setIconSize(QSize(24, 24))
-        self.add_roi_button.clicked.connect(lambda: self.add_roi.emit())
-        buttons_layout.addWidget(self.add_roi_button)
-        
-        self.clear_rois_button = QPushButton("Clear ROIs")
-        self.clear_rois_button.setIcon(QIcon("/home/zen/Pictures/Radar_stuff/icons/clear.png"))
-        self.clear_rois_button.setIconSize(QSize(24, 24))
-        self.clear_rois_button.clicked.connect(lambda: self.clear_rois.emit())
-        buttons_layout.addWidget(self.clear_rois_button)
-        
-        analysis_layout.addLayout(buttons_layout)
-        
-        # Generate report button
-        button_style = """
-            QPushButton {
-                background-color: #0D47A1;
-                border: none;
-                border-radius: 4px;
-                padding: 8px 16px;
-                font-weight: bold;
-                color: white;
-            }
-            QPushButton:hover {
-                background-color: #1565C0;
-            }
-            QPushButton:pressed {
-                background-color: #0A2C6B;
-            }
-            QPushButton:disabled {
-                background-color: #424242;
-                color: #757575;
-            }
-        """
-        
-        report_layout = QHBoxLayout()
-        self.report_button = QPushButton("Generate Report")
-        self.report_button.setIcon(QIcon("/home/zen/Pictures/Radar_stuff/icons/report.png"))
-        self.report_button.setIconSize(QSize(24, 24))
-        self.report_button.setCursor(Qt.PointingHandCursor)
-        self.report_button.setStyleSheet(button_style)
-        
-        # Assign the button to generate_report_button for state manager compatibility
-        self.generate_report_button = self.report_button
-        
-        self.report_button.clicked.connect(self.on_generate_report)
-        report_layout.addWidget(self.report_button)
-        analysis_layout.addLayout(report_layout)
-        
-        # Analysis metrics display
-        metrics_header = QLabel("Analysis Metrics")
-        metrics_header.setStyleSheet("font-weight: bold;")
-        analysis_layout.addWidget(metrics_header)
-        
-        self.metrics_label = QLabel("No analysis data available")
-        self.metrics_label.setStyleSheet("padding: 10px; background-color: rgba(30, 30, 30, 0.5); border-radius: 5px;")
-        self.metrics_label.setWordWrap(True)
-        self.metrics_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
-        self.metrics_label.setMinimumHeight(80)
-        analysis_layout.addWidget(self.metrics_label)
-        
-        # Add to parent layout
+        analysis_layout.setContentsMargins(15, 20, 15, 15) # More generous margins
+        analysis_layout.setSpacing(15) # Better spacing
+
+        # Add export/save buttons
+        button_layout = QHBoxLayout()
+        button_layout.setSpacing(10)
+
+        export_plot_button = QPushButton("Export Plot")
+        export_plot_button.clicked.connect(self.on_export_plot)
+        button_layout.addWidget(export_plot_button)
+
+        # Remove heatmap button as functionality is deprecated
+        # save_heatmap_button = QPushButton("Save Heatmap")
+        # save_heatmap_button.clicked.connect(self.on_save_heatmap) # This line causes the error
+        # button_layout.addWidget(save_heatmap_button)
+        analysis_layout.addLayout(button_layout)
+
+        # Add metrics display area
+        metrics_label = QLabel("Analysis Metrics")
+        analysis_layout.addWidget(metrics_label)
+
+        self.metrics_display = QLabel("No analysis data available")
+        self.metrics_display.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self.metrics_display.setWordWrap(True)
+        analysis_layout.addWidget(self.metrics_display)
+
         parent_layout.addWidget(analysis_group)
     
     def on_circle_toggle(self, index, state):
@@ -1973,7 +1561,7 @@ class ControlPanel(QWidget):
                 self.circle_toggled.emit(i, False)
     
     def on_start_collection(self):
-        """Handle start collection button click."""
+        """Handle start collection button click, including ROS2 bag recording."""
         # Use state manager to handle UI updates if defined
         if hasattr(self, 'state_manager'):
             self.state_manager.transition('start_collection')
@@ -1986,31 +1574,113 @@ class ControlPanel(QWidget):
         target_distance = self.target_combo.currentText()
         duration = int(self.duration_spin.value())
         
-        # Emit signal to start collection
-        self.start_collection.emit(config_name, target_distance, duration)
+        # Update plot title with current configuration
+        self.update_plot_config_name()
         
+        # Emit signal to start collection in the analyzer
+        self.start_collection.emit(config_name, target_distance, duration)
+
+        # Check if analyzer is available and ROS2 is active before starting bag recording
+        analyzer = getattr(self.main_window, 'analyzer', None)
+        # Use the checked ros2_available flag
+        if analyzer and getattr(analyzer, 'ros2_available', False):
+            # Start ROS2 bag recording with the current configuration name
+            try:
+                # Create a timestamp for unique bag naming
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                
+                # Set up recording directory using config name and target distance
+                folder = os.path.join(os.path.expanduser("~"), "radar_experiment_data/collection_bags")
+                os.makedirs(folder, exist_ok=True)
+                
+                # Create the bag path with config name and distance in the filename
+                record_path = os.path.join(folder, f"collection_{config_name}_{target_distance}m_{timestamp}")
+                
+                # Use standard topics for collection recording
+                topics = [
+                    '/ti_mmwave/radar_scan_pcl',
+                    '/ti_mmwave/radar_track_marker_array',
+                    '/ti_mmwave/radar_occupancy'
+                ]
+                
+                # Start recording with unlimited duration (we'll stop it when collection stops)
+                self.set_status(f"Attempting to start recording: {record_path}...", 0) # Update status
+                QApplication.processEvents() # Force UI update
+                
+                if analyzer.record_rosbag(record_path, topics, 0): # 0 = unlimited duration
+                    self.get_logger().info(f"Started ROS2 bag recording for collection: {record_path}") # Use logger
+                    self.collecting_bag_path = record_path  # Store for stopping later
+                    # Use state manager to update recording state
+                    self.state_manager.transition('start_recording')
+                    self.set_status(f"Collecting & Recording: {config_name}@{target_distance}m", 0) # Persistent status
+                else:
+                    self.get_logger().error(f"Failed to start ROS2 bag recording for collection.") # Use logger
+                    self.set_status(f"Collection Started (Recording Failed): {config_name}@{target_distance}m", 5000)
+            except Exception as e:
+                self.get_logger().error(f"Exception starting ROS2 bag recording: {e}", exc_info=True) # Log exception
+                self.set_status(f"Collection Started (Recording Error: {e})", 5000)
+        elif analyzer:
+            self.get_logger().warn("ROS2 is not available, skipping bag recording.") # Use logger
+            self.set_status(f"Collecting: {config_name}@{target_distance}m (ROS2 Recording Disabled)", 5000)
+        else:
+             self.get_logger().error("Analyzer not found, cannot start collection or recording.") # Use logger
+             self.set_status("Error: Analyzer not found!", 5000)
+             self.state_manager.transition('stop_collection') # Revert UI state
+             return # Stop further processing
+
         # Update UI
         self.collection_start_time = QDateTime.currentDateTime()
         self.collection_duration = duration
         
         # Start the timer for progress updates
-        if self.progress_timer.isActive():
-            self.progress_timer.stop()  # Ensure any previous timer is stopped
-        self.progress_timer.start(100)  # Update every 0.1 seconds
-        
-        self.set_status(f"Collecting: {config_name}@{target_distance}m")
+        if hasattr(self, 'progress_timer'):
+            if self.progress_timer.isActive():
+                self.progress_timer.stop()  # Ensure any previous timer is stopped
+            self.progress_timer.start(100)  # Update every 0.1 seconds
     
     def on_stop_collection(self):
-        """Handle stop collection button click."""
+        """Handle stop collection button click, including stopping bag recording."""
         # Mark that collection was manually stopped
         self.manual_stop_requested = True
         
+        # Stop data collection first
         self.stop_collection.emit()
         
-        # Use state manager to handle UI updates
+        # Stop ROS2 bag recording if it was started during collection
+        if hasattr(self, 'collecting_bag_path') and self.collecting_bag_path:
+            analyzer = getattr(self.main_window, 'analyzer', None)
+            if analyzer and getattr(analyzer, 'ros2_available', False) and analyzer.is_recording:
+                try:
+                    # Signal to stop the bag recording
+                    analyzer.stop_rosbag()
+                    self.state_manager.transition('stop_recording')
+                    
+                    # Log the completion
+                    self.get_logger().info(f"Stopped ROS2 bag recording: {self.collecting_bag_path}") # Use logger
+                    
+                    # Clear the stored path
+                    collecting_bag_name = os.path.basename(self.collecting_bag_path)
+                    self.collecting_bag_path = None
+                    
+                    # Show recording completion in status
+                    self.set_status(f"Collection stopped. Recording saved: {collecting_bag_name}", 5000)
+                except Exception as e:
+                    self.get_logger().error(f"Error stopping ROS2 bag recording: {e}", exc_info=True) # Log exception
+                    self.set_status("Collection stopped (Error stopping recording)", 5000)
+            else:
+                # Bag was not recording or analyzer/ros2 not available
+                self.get_logger().warn(f"Attempted to stop recording, but it wasn't active or ROS2/analyzer unavailable. Path: {self.collecting_bag_path}") # Use logger
+                self.set_status("Collection stopped (Recording was not active)", 5000)
+                self.collecting_bag_path = None # Clear path anyway
+        else:
+            self.get_logger().info("Collection stopped. No bag recording was associated with this collection.") # Use logger
+            self.set_status("Collection stopped (No bag recorded)", 5000)
+        
+        # Use state manager to handle UI updates for collection state
         self.state_manager.transition('stop_collection')
         
-        self.progress_timer.stop()
+        if hasattr(self, 'progress_timer'):
+            self.progress_timer.stop()
         
         # Update UI to indicate collection stopped
         self.progress_bar.setValue(0)
@@ -2027,13 +1697,14 @@ class ControlPanel(QWidget):
         if self.bag_started_for_generation:
             # Stop the bag playback
             print("Stopping bag playback that was started for data generation")
-            self.stop_rosbag.emit()
+            analyzer = getattr(self.main_window, 'analyzer', None)
+            if analyzer and getattr(analyzer, 'ros2_available', False) and analyzer.is_playing:
+                 analyzer.stop_rosbag()
             self.bag_started_for_generation = False
-            self.generate_from_bag_check.setChecked(False)
-            self.set_status("Collection and bag playback stopped")
-        else:
-            self.set_status("Collection stopped")
-    
+            if hasattr(self, 'generate_from_bag_check'):
+                self.generate_from_bag_check.setChecked(False)
+            self.set_status("Collection and bag playback stopped", 5000)
+
     def update_progress(self):
         """Update the progress bar during data collection."""
         if self.collection_start_time is None:
@@ -2198,141 +1869,117 @@ class ControlPanel(QWidget):
         if progress >= 100:
             self.progress_bar.setValue(100)
             self.progress_timer.stop()
+            # <<<<<<< SEARCH - REMOVE THIS MARKER
+            # ======= - REMOVE THIS MARKER
+            
+            self.get_logger().info(f"Collection progress reached 100% for duration {self.collection_duration}s.")
+
+            # --- Stop associated ROS2 bag recording --- 
+            recording_stopped_successfully = False
+            if hasattr(self, 'collecting_bag_path') and self.collecting_bag_path:
+                analyzer = getattr(self.main_window, 'analyzer', None)
+                if analyzer and getattr(analyzer, 'ros2_available', False) and analyzer.is_recording:
+                    try:
+                        self.get_logger().info(f"Collection duration reached. Stopping recording: {self.collecting_bag_path}")
+                        analyzer.stop_rosbag()
+                        self.state_manager.transition('stop_recording') # Update state first
+                        collecting_bag_name = os.path.basename(self.collecting_bag_path)
+                        self.set_status(f"Collection complete. Recording saved: {collecting_bag_name}", 5000)
+                        recording_stopped_successfully = True
+                        self.get_logger().info(f"Successfully stopped recording {collecting_bag_name} on completion.")
+                    except Exception as e:
+                        self.get_logger().error(f"Error stopping ROS2 bag recording on completion: {e}", exc_info=True)
+                        self.set_status("Collection complete (Error stopping recording)", 5000)
+                else:
+                     self.get_logger().warn(f"Collection complete, but associated recording {self.collecting_bag_path} was not active or ROS2/analyzer unavailable.")
+                     self.set_status("Collection complete (Recording was not active)", 5000)
+                # Clear the path regardless of whether stop was successful or needed
+                self.collecting_bag_path = None 
+            else:
+                self.get_logger().info("Collection complete. No bag recording was associated with this collection.")
+                self.set_status("Collection complete (No bag recorded)", 5000)
+
+            # --- Update Recording UI Elements (if recording was stopped) ---
+            if recording_stopped_successfully:
+                if hasattr(self, 'rosbag_group'):
+                    self.rosbag_group.setTitle("ROS2 Bag Controls")
+                if hasattr(self, 'recording_status_label'):
+                    self.recording_status_label.setText("Record Settings")
+                self.get_logger().info("Recording UI elements updated after auto-stop.")
+            
+            # Reset collection state using the state manager AFTER handling recording stop
+            self.state_manager.transition('stop_collection')
+            
+            # Reset point counter as collection is finished
+            self.reset_point_counter()
+            
+            # Explicitly re-enable start button and disable stop button
             self.start_button.setEnabled(True)
             self.stop_button.setEnabled(False)
-            self.set_status("Collection complete")
-            return
+            self.get_logger().info("Collection UI reset after completion.")
+            
+            return # Exit after handling completion
+            # >>>>>>> REPLACE - REMOVE THIS MARKER
     
     def on_reset_heatmap(self):
-        """Handle reset heatmap button click."""
-        self.reset_heatmap.emit()
-        self.reset_point_counter()  # Also reset the point counter
-        self.set_status("Heatmap reset")
-    
-    def on_colormap_changed(self, colormap):
-        """
-        Handle colormap change.
-        
-        Args:
-            colormap: New colormap name.
-        """
-        self.colormap_changed.emit(colormap)
-    
-    def on_decay_changed(self, value):
-        """
-        Handle decay factor slider change.
-        
-        Args:
-            value: Slider value (scaled by 1000).
-        """
-        decay = value / 1000.0
-        self.decay_value.setText(f"{decay:.3f}")
-        self.decay_factor_changed.emit(decay)
-    
-    def on_vis_mode_changed(self, mode):
-        """
-        Handle visualization mode change.
-        
-        Args:
-            mode: New visualization mode.
-        """
-        self.visualization_mode_changed.emit(mode)
-    
-    def on_noise_changed(self, value):
-        """
-        Handle noise floor slider change.
-        
-        Args:
-            value: Slider value (scaled by 100).
-        """
-        noise = value / 100.0
-        self.noise_value.setText(f"{noise:.2f}")
-        self.noise_floor_changed.emit(noise)
-    
-    def on_smoothing_changed(self, value):
-        """
-        Handle smoothing slider change.
-        
-        Args:
-            value: Slider value (scaled by 10).
-        """
-        smoothing = value / 10.0
-        self.smooth_value.setText(f"{smoothing:.1f}")
-        self.smoothing_changed.emit(smoothing)
-    
-    def on_generate_report(self):
-        """Handle generate report button click."""
-        # Use state manager to handle UI state
-        self.state_manager.transition('start_generating_report')
-        
-        try:
-            # Ensure bag playback doesn't restart automatically
-            self.bag_started_for_generation = False
-            self.manual_stop_requested = True
-            
-            # If the generate_from_bag_check is checked, uncheck it to prevent restart
-            if hasattr(self, 'generate_from_bag_check') and self.generate_from_bag_check.isChecked():
-                self.generate_from_bag_check.setChecked(False)
-            
-            # Emit signal to generate report
-            self.generate_report.emit()
-            self.set_status("Generating report...")
-        except Exception as e:
-            print(f"Error generating report: {e}")
-            self.set_status(f"Error generating report: {str(e)}")
-            
-            # Reset state on error
-            self.state_manager.transition('stop_generating_report')
-    
-    def on_report_completed(self, success=True, report_path=None):
-        """
-        Handle report generation completion.
-        
-        Args:
-            success: Whether report generation was successful
-            report_path: Path to the generated report if successful
-        """
-        # Update UI state
-        self.state_manager.transition('stop_generating_report')
-        
-        if success and report_path:
-            self.set_status(f"Report generated successfully: {os.path.basename(report_path)}")
-        else:
-            self.set_status("Report generation failed or was cancelled")
-    
-    def update_metrics(self, metrics):
-        """
-        Update the displayed analysis metrics.
-        
-        Args:
-            metrics: Dictionary of metric values.
-        """
-        if metrics is None:
-            self.metrics_label.setText("No analysis data available")
-            return
-        
-        # Check if we have 10-frame metrics available
-        has_10frame = 'ten_frame_avg_intensity' in metrics
-        
-        basic_text = (
-            f"Max: {metrics.get('max_intensity', 0):.3f}  "
-            f"Avg: {metrics.get('avg_intensity', 0):.3f}  "
-            f"SNR: {metrics.get('snr_dB', 0):.1f}dB  "
-            f"Coverage: {metrics.get('coverage_percentage', 0):.1f}%"
-        )
-        
-        if has_10frame:
-            ten_frame_text = (
-                f" | 10-Frame Avg: {metrics.get('ten_frame_avg_intensity', 0):.3f}  "
-                f"Stability: {metrics.get('ten_frame_stability', 0):.3f}  "
-                f"10F-SNR: {metrics.get('ten_frame_snr_dB', 0):.1f}dB"
-            )
-            text = basic_text + ten_frame_text
-        else:
-            text = basic_text
-            
-        self.metrics_label.setText(text)
+        """Handle reset heatmap request."""
+        # self.reset_heatmap.emit() # Signal removed as heatmap is disabled
+        self.set_status("Heatmap functionality removed", 5000)
 
+    def on_colormap_changed(self, colormap):
+        """Handle colormap change request."""
+        # self.colormap_changed.emit(colormap) # Signal removed
+        self.set_status(f"Colormap selection removed (heatmap disabled)", 5000)
+
+    def on_decay_changed(self, value):
+        """Handle decay factor change request."""
+        # self.decay_factor_changed.emit(value / 1000.0) # Signal removed
+        self.set_status(f"Decay factor removed (heatmap disabled)", 5000)
+
+    def on_vis_mode_changed(self, mode):
+        """Handle visualization mode change request."""
+        # self.visualization_mode_changed.emit(mode) # Signal removed
+        self.set_status(f"Visualization mode removed (heatmap disabled)", 5000)
+
+    def on_noise_changed(self, value):
+        """Handle noise floor change request."""
+        # self.noise_floor_changed.emit(value / 100.0) # Signal removed
+        self.set_status(f"Noise floor removed (heatmap disabled)", 5000)
+
+    def on_smoothing_changed(self, value):
+        """Handle smoothing factor change request."""
+        # self.smoothing_changed.emit(value / 10.0) # Signal removed
+        self.set_status(f"Smoothing factor removed (heatmap disabled)", 5000)
+
+    def on_generate_report(self):
+        """Handle generate report request."""
+        # Check if the analyzer is available
+        if not hasattr(self.main_window, 'analyzer') or self.main_window.analyzer is None:
+            self.set_status("Analyzer not ready for report generation.", 5000)
+            return
+
+        analyzer = self.main_window.analyzer
+
+        # Use state manager to handle UI state
+        self.state_manager.transition('start_generating_report') # Keep UI state change
+
+        # --- Removed all ROS Bag Recording Logic and associated flag setting ---
+        # The report generation process (triggered by the signal below)
+        # must handle its own data acquisition or use existing data/bags.
+        # This function should only signal the intent to generate a report.
+
+        # Proceed with report generation logic (emit signal)
+        try:
+            self.generate_report.emit()
+            self.set_status("Report generation initiated...", 5000)
+            # The MainWindow will handle the actual generation and potentially stopping any *other* recording
+        except Exception as e:
+            self.set_status(f"Error initiating report generation: {e}", 5000)
+            self.state_manager.transition('generation_error')
+            # No recording is started by this function, so no need to stop one on error.
+            # The downstream process handling the generate_report signal is responsible
+            # for its own error handling regarding data acquisition it might start.
+    
     def on_record_duration_changed(self, value):
         """Handle changes to the recording duration spinner."""
         # Update the estimated bag size based on the duration
@@ -3078,6 +2725,7 @@ class ControlPanel(QWidget):
         custom_topics_radio = QRadioButton("Custom topics:")
         custom_topics_edit = QLineEdit()
         custom_topics_edit.setPlaceholderText("Enter comma-separated topic names...")
+        custom_topics_edit.setText("/ti_mmwave/radar_scan_pcl, radar/pointcloud, radar/raw, radar/markers")
         custom_topics_edit.setEnabled(False)
         
         # Connect radio buttons to enable/disable custom topics field
@@ -3170,6 +2818,9 @@ class ControlPanel(QWidget):
                 topics = [t.strip() for t in custom_topics_edit.text().split(',') if t.strip()]
                 if not topics:
                     topics = ["-a"]  # Default to all if none specified
+                # Ensure the ti_mmwave topic is included
+                if "/ti_mmwave/radar_scan_pcl" not in topics:
+                    topics.append("/ti_mmwave/radar_scan_pcl")
             
             return {
                 "folder": folder,
@@ -3248,3 +2899,248 @@ class ControlPanel(QWidget):
         if remaining <= 0 and self.state_manager.get_state('recording_bag'):
             if hasattr(self, 'recording_timer'):
                 self.recording_timer.stop()
+
+    def on_trail_duration_changed(self, value):
+        """
+        Handle trail duration slider change.
+        
+        Args:
+            value: Slider value (scaled by 10 for precision).
+        """
+        duration_seconds = value / 10.0 # Convert slider value (10-600) to seconds (1.0-60.0)
+        self.trail_duration_label.setText(f"{duration_seconds:.1f}s")
+        self.trail_duration_changed.emit(duration_seconds)
+    
+    def on_trail_visibility_changed(self, checked):
+        """
+        Handle trail visibility checkbox change.
+        
+        Args:
+            checked: Whether the checkbox is checked.
+        """
+        self.trail_visibility_changed.emit(checked)
+    
+    def on_density_coloring_changed(self, checked):
+        """
+        Handle density coloring checkbox change.
+        
+        Args:
+            checked: Whether the checkbox is checked.
+        """
+        self.density_coloring_changed.emit(checked)
+
+    def update_plot_config_name(self, *args):
+        """
+        Update the ScatterView plot title with current configuration settings.
+        Called when any of the configuration parameters change (name, distance, duration).
+        """
+        # Get all parameters
+        config_name = self.config_entry.text().strip() or "unnamed_config"
+        target_distance = self.target_combo.currentText()
+        duration = self.duration_spin.value()
+        
+        # Ensure main window and scatter view are available
+        if hasattr(self, 'main_window') and self.main_window is not None:
+            # Check if scatter_view is directly available
+            if hasattr(self.main_window, 'scatter_view') and self.main_window.scatter_view is not None:
+                self.main_window.scatter_view.set_config_name(
+                    config_name, 
+                    float(target_distance), 
+                    duration
+                )
+            # Otherwise check if it's in a combined view container
+            elif hasattr(self.main_window, 'combined_view') and self.main_window.combined_view is not None:
+                if hasattr(self.main_window.combined_view, 'scatter_view') and self.main_window.combined_view.scatter_view is not None:
+                    self.main_window.combined_view.scatter_view.set_config_name(
+                        config_name, 
+                        float(target_distance), 
+                        duration
+                    )
+
+    def get_logger(self):
+        """Helper function to get the logger from the main window's analyzer."""
+        if hasattr(self.main_window, 'analyzer') and self.main_window.analyzer is not None:
+            return self.main_window.analyzer.get_logger()
+        else:
+            # Basic fallback logger if analyzer isn't available
+            import logging
+            return logging.getLogger("ControlPanelLogger")
+            
+    def _update_bag_info(self, bag_path):
+        """Get bag duration and update UI elements."""
+        if not bag_path or not os.path.exists(bag_path):
+            self.get_logger().warn(f"Bag path invalid or does not exist: {bag_path}")
+            self.bag_duration_seconds = 0.0
+            self.timeline_slider.setEnabled(False)
+            self.timestamp_label.setText("00:00 / 00:00")
+            return
+
+        # Handle case where user selects the .db3 file directly
+        if bag_path.endswith('.db3'):
+            bag_dir = os.path.dirname(bag_path)
+            if not bag_dir:
+                bag_dir = '.' # Use current directory if it was just a filename
+        elif os.path.isdir(bag_path):
+            bag_dir = bag_path
+        else:
+            self.get_logger().error(f"Invalid bag path provided: {bag_path}")
+            self.bag_duration_seconds = 0.0
+            self.timeline_slider.setEnabled(False)
+            self.timestamp_label.setText("00:00 / 00:00")
+            return
+
+        # Verify this is a valid ROS2 bag directory
+        metadata_path = os.path.join(bag_dir, 'metadata.yaml')
+        if not os.path.exists(metadata_path):
+            self.set_status(f"Error: Not a valid ROS2 bag (missing metadata.yaml)")
+            self.bag_duration_seconds = 0.0
+            self.timeline_slider.setEnabled(False)
+            self.timestamp_label.setText("00:00 / 00:00")
+            return
+
+        self.set_status(f"Getting info for {os.path.basename(bag_dir)}...")
+        QApplication.processEvents() # Update UI immediately
+
+        duration = 0.0
+        try:
+            # Run 'ros2 bag info' command
+            cmd = ['ros2', 'bag', 'info', bag_dir]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5.0, check=True)
+            self.get_logger().debug(f"'ros2 bag info {bag_dir}' output:\n{result.stdout}")
+
+            # Parse duration from the output
+            duration_line = [line for line in result.stdout.split('\n') if 'Duration:' in line]
+            if duration_line:
+                # Example: 'Duration:     10.123s'
+                duration_str = duration_line[0].split(':')[1].strip().split('s')[0]
+                try:
+                    duration = float(duration_str)
+                    self.get_logger().info(f"Parsed bag duration: {duration:.2f} seconds")
+                except ValueError:
+                    self.get_logger().error(f"Failed to parse bag duration value: '{duration_str}'")
+            else:
+                self.get_logger().warn(f"'Duration:' line not found in 'ros2 bag info' output for {bag_dir}")
+
+        except subprocess.TimeoutExpired:
+            self.get_logger().error(f"'ros2 bag info {bag_dir}' timed out after 5 seconds.")
+            self.set_status("Error: Timeout getting bag info")
+        except subprocess.CalledProcessError as e:
+            self.get_logger().error(f"'ros2 bag info {bag_dir}' failed with error code {e.returncode}")
+            self.get_logger().error(f"Stderr: {e.stderr}")
+            self.set_status(f"Error: Failed to get bag info (code {e.returncode})")
+        except FileNotFoundError:
+            self.get_logger().error("'ros2' command not found. Is ROS 2 installed and sourced?")
+            self.set_status("Error: 'ros2' command not found")
+        except Exception as e:
+            self.get_logger().error(f"Unexpected error getting bag info for {bag_dir}: {str(e)}")
+            self.set_status(f"Error: {str(e)}")
+
+        # Update attribute and UI
+        self.bag_duration_seconds = duration
+        if duration > 0:
+            total_minutes = int(duration // 60)
+            total_seconds = int(duration % 60)
+            self.timestamp_label.setText(f"00:00 / {total_minutes:02d}:{total_seconds:02d}")
+            self.timeline_slider.setEnabled(True)
+            self.timeline_slider.setValue(0) # Reset slider position
+            self.set_status(f"Loaded bag: {os.path.basename(bag_dir)} ({duration:.1f}s)")
+        else:
+            self.timestamp_label.setText("00:00 / 00:00")
+            self.timeline_slider.setEnabled(False)
+            self.set_status(f"Loaded bag: {os.path.basename(bag_dir)} (Duration unknown)")
+
+    def _update_timestamp_label(self, position):
+        """Helper function to update the timestamp label based on position."""
+        if self.bag_duration_seconds > 0:
+            current_time_secs = position * self.bag_duration_seconds
+            total_minutes = int(self.bag_duration_seconds // 60)
+            total_seconds = int(self.bag_duration_seconds % 60)
+            current_minutes = int(current_time_secs // 60)
+            current_seconds = int(current_time_secs % 60)
+            self.timestamp_label.setText(f"{current_minutes:02d}:{current_seconds:02d} / {total_minutes:02d}:{total_seconds:02d}")
+        else:
+            # Fallback using percentage if duration unknown
+            self.timestamp_label.setText(f"{position*100:.1f}% / Unknown")
+
+    def load_preset_config(self, index):
+        """Load the selected preset configuration into the UI controls."""
+        # Skip the first item ("<Load Preset>")
+        if index == 0:
+            return
+        
+        preset_name = self.preset_combo.itemText(index)
+        if preset_name in PREDEFINED_CONFIGS:
+            config = PREDEFINED_CONFIGS[preset_name]
+            
+            self.set_status(f"Loading preset: {preset_name}")
+            
+            # 1. Update Config Name
+            # self.config_entry.setText(preset_name)
+            
+            # 2. Update Target Distance
+            target_dist_str = f"{config['target_distance']:.1f}"
+            if self.target_combo.findText(target_dist_str) != -1:
+                self.target_combo.setCurrentText(target_dist_str)
+            else:
+                # Add the distance if not present and set it
+                self.target_combo.addItem(target_dist_str)
+                self.target_combo.setCurrentText(target_dist_str)
+            
+            # 3. Update Circle Parameters
+            for i, circle_config in enumerate(config['circles']):
+                # Use existing controls stored in self.circle_controls
+                if 0 <= i < len(self.circle_controls):
+                    controls = self.circle_controls[i]
+                    
+                    # Block signals to prevent cascading updates while setting values
+                    controls['enable'].blockSignals(True)
+                    controls['distance'].blockSignals(True)
+                    controls['angle'].blockSignals(True)
+                    
+                    # Set Enabled State
+                    controls['enable'].setChecked(circle_config['enabled'])
+                    # Manually emit the toggle signal after setting checkbox
+                    self.circle_toggled.emit(i, circle_config['enabled'])
+                    
+                    # Set Distance
+                    controls['distance'].setValue(float(circle_config['distance']))
+                    # Manually emit distance changed signal
+                    self.circle_distance_changed.emit(i, float(circle_config['distance']))
+                    
+                    # Set Angle
+                    controls['angle'].setValue(float(circle_config['angle']))
+                    # Manually emit angle changed signal
+                    self.circle_angle_changed.emit(i, float(circle_config['angle']))
+                    
+                    # Unblock signals
+                    controls['enable'].blockSignals(False)
+                    controls['distance'].blockSignals(False)
+                    controls['angle'].blockSignals(False)
+                    
+            # 4. Optionally switch to the active circle's tab
+            active_circle_index = config.get('active_circle', 0)
+            self.circle_tabs.setCurrentIndex(active_circle_index)
+            
+            # 5. Reset dropdown to placeholder after loading
+            self.preset_combo.setCurrentIndex(0)
+            
+            self.set_status(f"Preset '{preset_name}' loaded", 3000)
+
+    def on_hardware_config_selected(self, index):
+        """Update the Config Name field when a hardware config is selected."""
+        # Skip the first item ("<Select HW Config>")
+        if index == 0:
+            # Optionally clear the config_entry or set to default
+            # self.config_entry.setText("default_config")
+            return
+        
+        hw_config_filename = self.hw_config_combo.itemText(index)
+        # Remove the .cfg extension to get the name
+        config_name = hw_config_filename.replace(".cfg", "")
+        self.config_entry.setText(config_name)
+        
+        # Reset dropdown to placeholder after selection (optional)
+        # self.hw_config_combo.setCurrentIndex(0)
+
+# Make sure logging is configured if used as fallback
+logging.basicConfig(level=logging.INFO)

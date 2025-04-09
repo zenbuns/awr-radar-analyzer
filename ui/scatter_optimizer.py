@@ -189,11 +189,18 @@ class ScatterOptimizer:
             Tuple of (x, y, intensities) after optimization.
         """
         # Store the point count for reference
-        self.last_point_count = len(x)
+        point_count = len(x)
+        self.last_point_count = point_count
+        
+        # Special case: if there are very few points, don't throttle updates
+        # This ensures trail updates properly with sparse data
+        if point_count < 100:
+            return self.downsample(x, y, intensities)
         
         # Check if update should occur based on timing and point count
-        if not self.should_update(len(x)):
-            # Return empty arrays if we should skip update
+        if not self.should_update(point_count):
+            # Return empty arrays if we should skip update - this is okay
+            # since the caller (ScatterView) will handle this specially for trails
             return np.array([]), np.array([]), np.array([])
         
         # Apply downsampling if needed

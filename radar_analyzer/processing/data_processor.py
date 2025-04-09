@@ -13,41 +13,6 @@ from typing import Tuple, Dict, Any
 import os
 
 
-def calculate_heatmap_size(params) -> Tuple[int, int]:
-    """
-    Calculate the size of the heatmap grid based on max range and resolution.
-    
-    Adjusts the grid size to be even for memory efficiency and better visualization.
-
-    Args:
-        params: RadarExperimentParams object containing max_range and heatmap_resolution.
-
-    Returns:
-        A tuple containing the width and height of the heatmap grid in pixels.
-    """
-    # FIXED: Ensure grid size is large enough for the max_range with the given resolution
-    max_range = params.max_range
-    resolution = params.heatmap_resolution
-    
-    # Calculate the required grid size - multiply by 2 to cover negative to positive x-axis
-    # and 0 to max_range on y-axis
-    grid_size = int(2 * max_range / resolution)
-    
-    # Add a small buffer to ensure we don't lose points at the edges due to rounding
-    grid_size += 2
-    
-    # Ensure grid size is even for better memory alignment and to avoid indexing issues
-    if grid_size % 2 == 1:
-        grid_size += 1
-        
-    # Log the calculated size for debugging
-    if hasattr(params, 'get_logger'):
-        params.get_logger().debug(f"Calculated heatmap grid size: {grid_size}x{grid_size} "
-                                 f"for max_range={max_range}m and resolution={resolution}m")
-    
-    return grid_size, grid_size
-
-
 def filter_points_in_circle(
         analyzer,
         x: np.ndarray,
@@ -67,6 +32,11 @@ def filter_points_in_circle(
         intensities: Intensity values of points.
     """
     try:
+        # Important: Flip x-coordinates for calculation to be consistent with the visualization
+        # This ensures that negative angles (Left) appear on the left side and positive angles (Right) appear on the right side
+        # We need to flip x here because the scatter visualization flips x when displaying
+        flipped_x = -x if len(x) > 0 else np.array([], dtype=np.float32)
+        
         # Pre-calculate distances from origin (sensor) once for reuse
         distances_from_origin = np.sqrt(x**2 + y**2) if len(x) > 0 else np.array([], dtype=np.float32)
         
@@ -89,57 +59,61 @@ def filter_points_in_circle(
             
         # During collection from bag, only process primary circle unless specifically needed
         if analyzer.collecting_data and hasattr(analyzer, 'is_playing') and analyzer.is_playing:
-            # Only process primary circle for collection
-            circle = analyzer.params.circles[0]
-            if not circle.enabled:
-                return
+            # Process all enabled circles for collection instead of just the primary one
+            for i, circle in enumerate(analyzer.params.circles):
+                if not circle.enabled:
+                    continue
+                    
+                # Determine the circle key based on index
+                circle_key = f'circle{i+1}' if i > 0 else 'circle'
                 
-            # Calculate circle center based on distance and angle
-            angle_rad = math.radians(circle.angle)
-            circle_center_x = circle.distance * math.sin(angle_rad)
-            circle_center_y = circle.distance * math.cos(angle_rad)
-            
-            # Fast vectorized distance calculation using precomputed components
-            dx = x - circle_center_x
-            dy = y - circle_center_y
-            dist_sq = dx * dx + dy * dy
-            radius_sq = circle.radius ** 2
-            
-            # Find points within circle
-            indices = np.where(dist_sq <= radius_sq)[0]
-            
-            # Store results directly without extra processing
-            if len(indices) > 0:
-                analyzer.current_data['circle_x'] = x[indices]
-                analyzer.current_data['circle_y'] = y[indices]
-                analyzer.current_data['circle_intensities'] = intensities[indices]
-                analyzer.current_data['circle_indices'] = indices
+                # Calculate circle center based on distance and angle
+                angle_rad = math.radians(circle.angle)
+                circle_center_x = circle.distance * math.sin(angle_rad)
+                circle_center_y = circle.distance * math.cos(angle_rad)
                 
-                # Use pre-calculated distances instead of recalculating
-                circle_distances = distances_from_origin[indices]
-                analyzer.current_data['circle_distances'] = circle_distances
+                # Fast vectorized distance calculation using precomputed components
+                # Use flipped_x to be consistent with visualization
+                dx = flipped_x - circle_center_x
+                dy = y - circle_center_y
+                dist_sq = dx * dx + dy * dy
+                radius_sq = circle.radius ** 2
                 
-                # Only create minimal distance bands needed for core analysis
-                dist_bands = {}
-                bands = [(0, 10), (10, 20), (20, 30), (30, float('inf'))]
+                # Find points within circle
+                indices = np.where(dist_sq <= radius_sq)[0]
                 
-                # Process all bands in a single loop with one calculation
-                for min_dist, max_dist in bands:
-                    band_mask = (circle_distances >= min_dist) & (circle_distances < max_dist)
-                    band_indices = np.where(band_mask)[0]
-                    dist_bands[f'{min_dist}-{max_dist}'] = {
-                        'indices': band_indices,
-                        'count': len(band_indices)
-                    }
-                analyzer.current_data['circle_distance_bands'] = dist_bands
-            else:
-                analyzer.current_data['circle_x'] = empty_float_array
-                analyzer.current_data['circle_y'] = empty_float_array
-                analyzer.current_data['circle_intensities'] = empty_float_array
-                analyzer.current_data['circle_indices'] = empty_int_array
-                analyzer.current_data['circle_distances'] = empty_float_array
-                analyzer.current_data['circle_distance_bands'] = empty_bands.copy()
-                
+                # Store results directly without extra processing
+                if len(indices) > 0:
+                    analyzer.current_data[f'{circle_key}_x'] = x[indices]
+                    analyzer.current_data[f'{circle_key}_y'] = y[indices]
+                    analyzer.current_data[f'{circle_key}_intensities'] = intensities[indices]
+                    analyzer.current_data[f'{circle_key}_indices'] = indices
+                    
+                    # Use pre-calculated distances instead of recalculating
+                    circle_distances = distances_from_origin[indices]
+                    analyzer.current_data[f'{circle_key}_distances'] = circle_distances
+                    
+                    # Only create minimal distance bands needed for core analysis
+                    dist_bands = {}
+                    bands = [(0, 10), (10, 20), (20, 30), (30, float('inf'))]
+                    
+                    # Process all bands in a single loop with one calculation
+                    for min_dist, max_dist in bands:
+                        band_mask = (circle_distances >= min_dist) & (circle_distances < max_dist)
+                        band_indices = np.where(band_mask)[0]
+                        dist_bands[f'{min_dist}-{max_dist}'] = {
+                            'indices': band_indices,
+                            'count': len(band_indices)
+                        }
+                    analyzer.current_data[f'{circle_key}_distance_bands'] = dist_bands
+                else:
+                    analyzer.current_data[f'{circle_key}_x'] = empty_float_array
+                    analyzer.current_data[f'{circle_key}_y'] = empty_float_array
+                    analyzer.current_data[f'{circle_key}_intensities'] = empty_float_array
+                    analyzer.current_data[f'{circle_key}_indices'] = empty_int_array
+                    analyzer.current_data[f'{circle_key}_distances'] = empty_float_array
+                    analyzer.current_data[f'{circle_key}_distance_bands'] = empty_bands.copy()
+                    
             return
         
         # Process each enabled circle with full processing for visualization
@@ -155,9 +129,14 @@ def filter_points_in_circle(
         # Precompute regular bands once
         regular_bands = [(i * band_size, (i + 1) * band_size) for i in range(10)]
         
-        for i, circle in enumerate(analyzer.params.circles):
-            circle_key = f'circle{i+1}' if i > 0 else 'circle'
+        # IMPORTANT: Process each circle's points according to their enabled status
+        # This should match what visualizer does - do NOT count same points twice
+        all_counted_points = set()
+        
+        for circle_idx, circle in enumerate(analyzer.params.circles):
+            circle_key = f'circle{circle_idx+1}' if circle_idx > 0 else 'circle'
             
+            # Skip disabled circles
             if not circle.enabled:
                 # Initialize empty arrays for disabled circles - reuse templates
                 analyzer.current_data[f'{circle_key}_x'] = empty_float_array
@@ -174,7 +153,8 @@ def filter_points_in_circle(
             circle_center_y = circle.distance * math.cos(angle_rad)
             
             # Efficient vectorized distance calculation
-            dx = x - circle_center_x
+            # Use flipped_x to be consistent with visualization
+            dx = flipped_x - circle_center_x
             dy = y - circle_center_y
             dist_sq = dx * dx + dy * dy
             radius_sq = circle.radius ** 2
@@ -404,20 +384,8 @@ def update_live_heatmap_vectorized(
                 count = np.sum((distances >= min_d) & (distances < max_d))
                 band_counts.append(f"{min_d}-{max_d}m: {count}")
             
-            analyzer.get_logger().debug(f"Point distance distribution: {', '.join(band_counts)}")
+            # Don't return anything here - this is just for debugging
             
-            # Also log azimuth distribution (horizontal axis)
-            azimuth_bands = [
-                (-35, -30), (-30, -20), (-20, -10), (-10, 0),
-                (0, 10), (10, 20), (20, 30), (30, 35)
-            ]
-            azimuth_counts = []
-            for min_a, max_a in azimuth_bands:
-                count = np.sum((x >= min_a) & (x < max_a))
-                azimuth_counts.append(f"{min_a}-{max_a}m: {count}")
-            
-            analyzer.get_logger().debug(f"Azimuth distribution: {', '.join(azimuth_counts)}")
-        
         # Use shared grid preparation logic
         grid_x, grid_y, intensity_valid, grid_size_x, grid_size_y = _prepare_grid_indices(analyzer, x, y, intensity)
         if grid_x is None:

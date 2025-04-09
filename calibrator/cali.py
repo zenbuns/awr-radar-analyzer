@@ -196,7 +196,7 @@ class AWR1843Calibrator:
                 "adcCfg 2 1",
                 "adcbufCfg -1 0 1 1 1",
                 "lowPower 0 0",
-                "profileCfg 0 77 20 3 40 0 0 100 1 512 10000 0 0 30",  # Modified for extended range
+                "profileCfg 0 77 7 5 35 0 0 5 0 256 10000 0 0 30",  # Modified for extended range
                 "chirpCfg 0 0 0 0 0 0 0 1",
                 "chirpCfg 1 1 0 0 0 0 0 4",
                 "chirpCfg 2 2 0 0 0 0 0 2",

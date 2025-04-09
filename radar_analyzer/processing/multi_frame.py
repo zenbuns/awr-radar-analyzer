@@ -11,7 +11,6 @@ import os
 import math
 import time
 import numpy as np
-from .data_processor import calculate_heatmap_size
 
 
 def process_multi_frame_data(
@@ -99,7 +98,10 @@ def combine_multi_frames(analyzer) -> None:
     
     max_range = analyzer.params.max_range
     res = analyzer.params.heatmap_resolution
-    grid_size_x, grid_size_y = calculate_heatmap_size(analyzer.params)
+    grid_size_x = int(2 * max_range / res) + 2
+    grid_size_y = int(max_range / res) + 2 # Assuming y-axis is 0 to max_range
+    if grid_size_x % 2 == 1: grid_size_x += 1
+    if grid_size_y % 2 == 1: grid_size_y += 1
     
     # Create grid accumulators
     combined_grid = np.zeros((grid_size_y, grid_size_x), dtype=np.float32)
@@ -194,9 +196,15 @@ def compute_multi_frame_metrics(analyzer) -> None:
         metrics['combined_intensity_std'] = float(np.std(analyzer.combined_frame['intensities']))
     
     # 3. Coverage metrics - percentage of voxels filled
-    grid_size_x, grid_size_y = calculate_heatmap_size(analyzer.params)
+    max_range = analyzer.params.max_range
+    res = analyzer.params.heatmap_resolution
+    grid_size_x = int(2 * max_range / res) + 2
+    grid_size_y = int(max_range / res) + 2 # Assuming y-axis is 0 to max_range
+    if grid_size_x % 2 == 1: grid_size_x += 1
+    if grid_size_y % 2 == 1: grid_size_y += 1
+    
     total_cells = grid_size_x * grid_size_y
-    metrics['coverage_percentage'] = float(len(analyzer.combined_frame['x']) / total_cells * 100)
+    metrics['coverage_percentage'] = float(len(analyzer.combined_frame['x']) / max(1, total_cells) * 100)
     
     # 4. Noise reduction metrics - using variance of intensities in each occupied voxel
     avg_frame_intensity_std = np.mean(
@@ -243,15 +251,21 @@ def compute_multi_frame_metrics(analyzer) -> None:
         
         # 7. Calculate metrics for all ROI circles
         # Process metrics for each of the three circles
+        
+        # Helper to store points that have been processed for any enabled circle
+        all_counted_points = set()
+        
+        # Process each enabled circle in order
         for circle_idx, circle in enumerate(analyzer.params.circles):
             if not circle.enabled:
                 continue
                 
+            # Only process primary circle first (index 0)
+            if circle_idx != 0:
+                continue
+            
             # Prefix for the metrics keys based on circle index
-            if circle_idx == 0:
-                prefix = 'roi'  # Keep original naming for backward compatibility
-            else:
-                prefix = f'roi{circle_idx+1}'  # roi2, roi3 for the other circles
+            prefix = 'roi'  # Keep original naming for backward compatibility
             
             # Combine the circle points from each frame in the buffer
             circle_x_points = []
@@ -265,12 +279,16 @@ def compute_multi_frame_metrics(analyzer) -> None:
             circle_center_y = circle.distance * math.cos(angle_rad)
             
             # For each frame, filter points in this circle
-            for frame in recent_frames:
+            for frame_idx, frame in enumerate(recent_frames):
                 if len(frame['x']) == 0:
                     continue
                     
+                # Flip x-coordinates to match visualization
+                flipped_x = -frame['x']
+                    
                 # Apply ROI circle filter logic for this circle
-                dx = frame['x'] - circle_center_x
+                # Use flipped_x for distance calculations to be consistent with visualization
+                dx = flipped_x - circle_center_x
                 dy = frame['y'] - circle_center_y
                 dist_sq = dx * dx + dy * dy
                 radius_sq = circle.radius ** 2
@@ -279,10 +297,15 @@ def compute_multi_frame_metrics(analyzer) -> None:
                 circle_indices = np.where(dist_sq <= radius_sq)[0]
                 
                 if len(circle_indices) > 0:
+                    # For primary ROI, add all points and track them
                     circle_x_points.append(frame['x'][circle_indices])
                     circle_y_points.append(frame['y'][circle_indices])
                     circle_intensities.append(frame['intensities'][circle_indices])
                     circle_frame_counts.append(len(circle_indices))
+                    
+                    # Track these points as already counted
+                    for idx in circle_indices:
+                        all_counted_points.add((frame_idx, idx))
         
             # Calculate metrics for this circle if we have data
             if circle_frame_counts:
@@ -295,7 +318,7 @@ def compute_multi_frame_metrics(analyzer) -> None:
                 all_circle_intensities = np.concatenate(circle_intensities) if circle_intensities else np.array([])
                 
                 metrics[f'{prefix}_combined_point_count'] = len(all_circle_x)
-            
+                
                 # Advanced intensity metrics
                 if len(all_circle_intensities) > 0:
                     metrics[f'{prefix}_combined_avg_intensity'] = float(np.mean(all_circle_intensities))
@@ -310,6 +333,13 @@ def compute_multi_frame_metrics(analyzer) -> None:
                     # Signal-to-noise ratio in dB
                     metrics[f'{prefix}_snr_db'] = float(20 * np.log10(metrics[f'{prefix}_combined_avg_intensity'] / 
                                                            max(0.001, metrics[f'{prefix}_combined_intensity_std'])))
+                else:
+                    metrics[f'{prefix}_combined_point_count'] = 0
+                    metrics[f'{prefix}_avg_single_frame_count'] = 0.0
+                    metrics[f'{prefix}_combined_avg_intensity'] = 0.0
+                    metrics[f'{prefix}_combined_max_intensity'] = 0.0
+                    metrics[f'{prefix}_combined_min_intensity'] = 0.0
+                    metrics[f'{prefix}_snr_db'] = 0.0
             
                 # Advanced point density metrics
                 if metrics[f'{prefix}_avg_single_frame_count'] > 0:
@@ -358,6 +388,241 @@ def compute_multi_frame_metrics(analyzer) -> None:
                                                                       max(0.001, metrics[f'{prefix}_mean_point_separation'])))
                     except Exception as e:
                         analyzer.get_logger().warning(f"Unable to calculate spatial metrics for {prefix}: {str(e)}")
+            
+                # --- NEW: Calculate Distance Bands for this specific ROI --- 
+                if len(all_circle_x) > 0:
+                    # Calculate Euclidean distances for points within this circle
+                    distances_in_roi = np.sqrt(all_circle_x**2 + all_circle_y**2)
+                    
+                    # Define distance bands (0-10, 10-20, 20-30)
+                    bins = [0, 10, 20, 30]
+                    
+                    # Calculate counts for each band
+                    band_counts, _ = np.histogram(distances_in_roi, bins=bins)
+                    
+                    # Store band counts in metrics dictionary
+                    metrics[f'{prefix}_band_0_10m_count'] = int(band_counts[0]) if len(band_counts) > 0 else 0
+                    metrics[f'{prefix}_band_10_20m_count'] = int(band_counts[1]) if len(band_counts) > 1 else 0
+                    metrics[f'{prefix}_band_20_30m_count'] = int(band_counts[2]) if len(band_counts) > 2 else 0
+                    
+                    analyzer.get_logger().debug(f"Calculated distance bands for {prefix}: 0-10m={metrics[f'{prefix}_band_0_10m_count']}, 10-20m={metrics[f'{prefix}_band_10_20m_count']}, 20-30m={metrics[f'{prefix}_band_20_30m_count']}")
+                else:
+                    # Set band counts to 0 if no points in ROI
+                    metrics[f'{prefix}_band_0_10m_count'] = 0
+                    metrics[f'{prefix}_band_10_20m_count'] = 0
+                    metrics[f'{prefix}_band_20_30m_count'] = 0
+            
+                # Spatial distribution metrics if we have enough points
+                if len(all_circle_x) > 5 and len(all_circle_y) > 5:
+                    try:
+                        from scipy.spatial import cKDTree
+                        points = np.column_stack((all_circle_x, all_circle_y))
+                        tree = cKDTree(points)
+                        
+                        # Calculate nearest neighbor distances for spatial uniformity analysis
+                        k = min(4, len(points))
+                        distances, _ = tree.query(points, k=k)
+                        nn_distances = distances[:, 1:] if distances.shape[1] > 1 else distances
+                        
+                        # Mean nearest neighbor distance (smaller values indicate better coverage)
+                        metrics[f'{prefix}_mean_point_separation'] = float(np.mean(nn_distances))
+                        
+                        # Uniformity index based on coefficient of variation of distances
+                        # (0-1 scale where higher values indicate more uniform distribution)
+                        std_nn_dist = np.std(nn_distances)
+                        metrics[f'{prefix}_spatial_uniformity'] = float(1.0 - min(1.0, std_nn_dist / 
+                                                                      max(0.001, metrics[f'{prefix}_mean_point_separation'])))
+                    except Exception as e:
+                        analyzer.get_logger().warning(f"Unable to calculate spatial metrics for {prefix}: {str(e)}")
+        
+        # Now process secondary ROI circles
+        for circle_idx, circle in enumerate(analyzer.params.circles):
+            if not circle.enabled:
+                continue
+                
+            # Skip primary circle since we already processed it
+            if circle_idx == 0:
+                continue
+                
+            # Prefix for the metrics keys based on circle index
+            prefix = f'roi{circle_idx + 1}'  # roi2, roi3, etc.
+            
+            # Combine the circle points from each frame in the buffer
+            circle_x_points = []
+            circle_y_points = []
+            circle_intensities = []
+            circle_frame_counts = []
+            
+            # Calculate circle center based on distance and angle
+            angle_rad = math.radians(circle.angle)
+            circle_center_x = circle.distance * math.sin(angle_rad)
+            circle_center_y = circle.distance * math.cos(angle_rad)
+            
+            # For each frame, filter points in this circle
+            for frame_idx, frame in enumerate(recent_frames):
+                if len(frame['x']) == 0:
+                    continue
+                    
+                # Flip x-coordinates to match visualization
+                flipped_x = -frame['x']
+                    
+                # Apply ROI circle filter logic for this circle
+                # Use flipped_x for distance calculations to be consistent with visualization
+                dx = flipped_x - circle_center_x
+                dy = frame['y'] - circle_center_y
+                dist_sq = dx * dx + dy * dy
+                radius_sq = circle.radius ** 2
+                
+                # Find points within circle
+                circle_indices = np.where(dist_sq <= radius_sq)[0]
+                
+                if len(circle_indices) > 0:
+                    # Filter out points already counted in primary ROI
+                    unique_indices = []
+                    for idx in circle_indices:
+                        point_id = (frame_idx, idx)
+                        if point_id not in all_counted_points:
+                            unique_indices.append(idx)
+                    
+                    # Use the filtered unique indices
+                    if unique_indices:
+                        unique_indices = np.array(unique_indices)
+                        circle_x_points.append(frame['x'][unique_indices])
+                        circle_y_points.append(frame['y'][unique_indices])
+                        circle_intensities.append(frame['intensities'][unique_indices])
+                        circle_frame_counts.append(len(unique_indices))
+                        
+                        # Track these points so they won't be counted in outside ROI
+                        for idx in unique_indices:
+                            all_counted_points.add((frame_idx, idx))
+            
+            # Calculate metrics for this circle if we have data
+            if circle_frame_counts:
+                # Basic frame count metrics
+                metrics[f'{prefix}_avg_single_frame_count'] = float(np.mean(circle_frame_counts))
+                
+                # Combine all points for this circle
+                all_circle_x = np.concatenate(circle_x_points) if circle_x_points else np.array([])
+                all_circle_y = np.concatenate(circle_y_points) if circle_y_points else np.array([])
+                all_circle_intensities = np.concatenate(circle_intensities) if circle_intensities else np.array([])
+                
+                metrics[f'{prefix}_combined_point_count'] = len(all_circle_x)
+            
+                # Advanced intensity metrics
+                if len(all_circle_intensities) > 0:
+                    metrics[f'{prefix}_combined_avg_intensity'] = float(np.mean(all_circle_intensities))
+                    metrics[f'{prefix}_combined_max_intensity'] = float(np.max(all_circle_intensities))
+                    metrics[f'{prefix}_combined_min_intensity'] = float(np.min(all_circle_intensities))
+                    metrics[f'{prefix}_combined_intensity_std'] = float(np.std(all_circle_intensities))
+                    
+                    # Coefficient of variation (measure of relative dispersion)
+                    metrics[f'{prefix}_intensity_variability'] = float(metrics[f'{prefix}_combined_intensity_std'] / 
+                                                                   max(0.001, metrics[f'{prefix}_combined_avg_intensity']))
+                    
+                    # Signal-to-noise ratio in dB
+                    metrics[f'{prefix}_snr_db'] = float(20 * np.log10(metrics[f'{prefix}_combined_avg_intensity'] / 
+                                                           max(0.001, metrics[f'{prefix}_combined_intensity_std'])))
+                else:
+                    metrics[f'{prefix}_combined_point_count'] = 0
+                    metrics[f'{prefix}_avg_single_frame_count'] = 0.0
+                    metrics[f'{prefix}_combined_avg_intensity'] = 0.0
+                    metrics[f'{prefix}_combined_max_intensity'] = 0.0
+                    metrics[f'{prefix}_combined_min_intensity'] = 0.0
+                    metrics[f'{prefix}_snr_db'] = 0.0
+            
+                # Advanced point density metrics
+                if metrics[f'{prefix}_avg_single_frame_count'] > 0:
+                    # Circle area in m²
+                    circle_area = np.pi * (circle.radius ** 2)
+                    
+                    # Raw improvement ratio
+                    metrics[f'{prefix}_point_density_improvement'] = float(metrics[f'{prefix}_combined_point_count'] / 
+                                                                      max(1, metrics[f'{prefix}_avg_single_frame_count']))
+                    
+                    # Logarithmic improvement scale (dB) - more scientific
+                    metrics[f'{prefix}_density_gain_db'] = float(10 * np.log10(max(1.001, metrics[f'{prefix}_point_density_improvement'])))
+                    
+                    # Calculate actual spatial point density (points/m²)
+                    metrics[f'{prefix}_spatial_density'] = float(metrics[f'{prefix}_combined_point_count'] / max(0.001, circle_area))
+                    
+                    # Normalized density improvement relative to single frame density
+                    single_frame_density = metrics[f'{prefix}_avg_single_frame_count'] / max(0.001, circle_area)
+                    metrics[f'{prefix}_normalized_density_factor'] = float(metrics[f'{prefix}_spatial_density'] /
+                                                                          max(0.001, single_frame_density))
+                else:
+                    metrics[f'{prefix}_point_density_improvement'] = 0.0
+                    metrics[f'{prefix}_density_gain_db'] = 0.0
+                    metrics[f'{prefix}_spatial_density'] = 0.0
+                    metrics[f'{prefix}_normalized_density_factor'] = 0.0
+            
+                # Spatial distribution metrics if we have enough points
+                if len(all_circle_x) > 5 and len(all_circle_y) > 5:
+                    try:
+                        from scipy.spatial import cKDTree
+                        points = np.column_stack((all_circle_x, all_circle_y))
+                        tree = cKDTree(points)
+                        
+                        # Calculate nearest neighbor distances for spatial uniformity analysis
+                        k = min(4, len(points))
+                        distances, _ = tree.query(points, k=k)
+                        nn_distances = distances[:, 1:] if distances.shape[1] > 1 else distances
+                        
+                        # Mean nearest neighbor distance (smaller values indicate better coverage)
+                        metrics[f'{prefix}_mean_point_separation'] = float(np.mean(nn_distances))
+                        
+                        # Uniformity index based on coefficient of variation of distances
+                        # (0-1 scale where higher values indicate more uniform distribution)
+                        std_nn_dist = np.std(nn_distances)
+                        metrics[f'{prefix}_spatial_uniformity'] = float(1.0 - min(1.0, std_nn_dist / 
+                                                                      max(0.001, metrics[f'{prefix}_mean_point_separation'])))
+                    except Exception as e:
+                        analyzer.get_logger().warning(f"Unable to calculate spatial metrics for {prefix}: {str(e)}")
+            
+                # --- NEW: Calculate Distance Bands for this specific ROI --- 
+                if len(all_circle_x) > 0:
+                    # Calculate Euclidean distances for points within this circle
+                    distances_in_roi = np.sqrt(all_circle_x**2 + all_circle_y**2)
+                    
+                    # Define distance bands (0-10, 10-20, 20-30)
+                    bins = [0, 10, 20, 30]
+                    
+                    # Calculate counts for each band
+                    band_counts, _ = np.histogram(distances_in_roi, bins=bins)
+                    
+                    # Store band counts in metrics dictionary
+                    metrics[f'{prefix}_band_0_10m_count'] = int(band_counts[0]) if len(band_counts) > 0 else 0
+                    metrics[f'{prefix}_band_10_20m_count'] = int(band_counts[1]) if len(band_counts) > 1 else 0
+                    metrics[f'{prefix}_band_20_30m_count'] = int(band_counts[2]) if len(band_counts) > 2 else 0
+                    
+                    analyzer.get_logger().debug(f"Calculated distance bands for {prefix}: 0-10m={metrics[f'{prefix}_band_0_10m_count']}, 10-20m={metrics[f'{prefix}_band_10_20m_count']}, 20-30m={metrics[f'{prefix}_band_20_30m_count']}")
+                else:
+                    # Set band counts to 0 if no points in ROI
+                    metrics[f'{prefix}_band_0_10m_count'] = 0
+                    metrics[f'{prefix}_band_10_20m_count'] = 0
+                    metrics[f'{prefix}_band_20_30m_count'] = 0
+            
+                # Spatial distribution metrics if we have enough points
+                if len(all_circle_x) > 5 and len(all_circle_y) > 5:
+                    try:
+                        from scipy.spatial import cKDTree
+                        points = np.column_stack((all_circle_x, all_circle_y))
+                        tree = cKDTree(points)
+                        
+                        # Calculate nearest neighbor distances for spatial uniformity analysis
+                        k = min(4, len(points))
+                        distances, _ = tree.query(points, k=k)
+                        nn_distances = distances[:, 1:] if distances.shape[1] > 1 else distances
+                        
+                        # Mean nearest neighbor distance (smaller values indicate better coverage)
+                        metrics[f'{prefix}_mean_point_separation'] = float(np.mean(nn_distances))
+                        
+                        # Uniformity index based on coefficient of variation of distances
+                        # (0-1 scale where higher values indicate more uniform distribution)
+                        std_nn_dist = np.std(nn_distances)
+                        metrics[f'{prefix}_spatial_uniformity'] = float(1.0 - min(1.0, std_nn_dist / 
+                                                                      max(0.001, metrics[f'{prefix}_mean_point_separation'])))
+                    except Exception as e:
+                        analyzer.get_logger().warning(f"Unable to calculate spatial metrics for {prefix}: {str(e)}")
         
         # Calculate metrics for points outside any ROI circle
         # Instead of concatenating all points, calculate frame by frame for consistency with ROI calculations
@@ -367,7 +632,7 @@ def compute_multi_frame_metrics(analyzer) -> None:
         outside_roi_frame_counts = []
         
         # Process each frame individually to maintain frame integrity
-        for frame in recent_frames:
+        for frame_idx, frame in enumerate(recent_frames):
             if len(frame['x']) == 0:
                 outside_roi_frame_counts.append(0)
                 continue
@@ -375,7 +640,12 @@ def compute_multi_frame_metrics(analyzer) -> None:
             # Start with all points in this frame
             frame_mask = np.ones(len(frame['x']), dtype=bool)
             
-            # Exclude points that are within any enabled ROI circle
+            # First, exclude points that have already been counted in any ROI
+            for idx in range(len(frame['x'])):
+                if (frame_idx, idx) in all_counted_points:
+                    frame_mask[idx] = False
+            
+            # Then exclude points that are within any enabled ROI circle
             for circle_idx, circle in enumerate(analyzer.params.circles):
                 if not circle.enabled:
                     continue
@@ -385,8 +655,11 @@ def compute_multi_frame_metrics(analyzer) -> None:
                 circle_center_x = circle.distance * math.sin(angle_rad)
                 circle_center_y = circle.distance * math.cos(angle_rad)
                 
+                # Flip x-coordinates to match visualization
+                flipped_x = -frame['x']
+                
                 # Calculate squared distances to circle center
-                dx = frame['x'] - circle_center_x
+                dx = flipped_x - circle_center_x
                 dy = frame['y'] - circle_center_y
                 dist_sq = dx * dx + dy * dy
                 radius_sq = circle.radius ** 2
@@ -414,6 +687,154 @@ def compute_multi_frame_metrics(analyzer) -> None:
         metrics['outside_roi_combined_point_count'] = len(combined_outside_x)
         metrics['outside_roi_avg_single_frame_count'] = float(np.mean(outside_roi_frame_counts)) if outside_roi_frame_counts else 0.0
         
+        # Calculate distance bands based on proper Euclidean distance for points outside ROIs
+        # These bands will be used in CSV reports: 0-10m, 10-20m, 20-30m
+        if len(combined_outside_x) > 0:
+            # Calculate Euclidean distances from origin (0,0) - this matches the scatter plot's coordinate system
+            outside_distances = np.sqrt(combined_outside_x**2 + combined_outside_y**2)
+            
+            # Create distance band masks
+            band_0_10_mask = outside_distances < 10.0
+            band_10_20_mask = (outside_distances >= 10.0) & (outside_distances < 20.0)
+            band_20_30_mask = (outside_distances >= 20.0) & (outside_distances < 30.0)
+            
+            # Count points in each band - only for points OUTSIDE ROIs
+            outside_0_10m_count = int(np.sum(band_0_10_mask))
+            outside_10_20m_count = int(np.sum(band_10_20_mask))
+            outside_20_30m_count = int(np.sum(band_20_30_mask))
+            
+            # Now also get points from inside all ROIs and add them based on distance
+            inside_0_10m_count = 0
+            inside_10_20m_count = 0
+            inside_20_30m_count = 0
+            
+            # Collect all inside ROI points
+            all_inside_x = np.array([])
+            all_inside_y = np.array([])
+            
+            # Primary ROI
+            if 'roi_combined_point_count' in metrics and metrics['roi_combined_point_count'] > 0:
+                # We need to recalculate distances for these points
+                # Calculate primary ROI center
+                primary_circle = analyzer.params.circles[0]
+                angle_rad = math.radians(primary_circle.angle)
+                circle_center_x = primary_circle.distance * math.sin(angle_rad)
+                circle_center_y = primary_circle.distance * math.cos(angle_rad)
+                
+                # Get all inside ROI points from frames and gather them
+                roi_x_points = []
+                roi_y_points = []
+                
+                for frame_idx, frame in enumerate(recent_frames):
+                    if len(frame['x']) == 0:
+                        continue
+                    
+                    # Calculate distances to circle center
+                    dx = frame['x'] - circle_center_x
+                    dy = frame['y'] - circle_center_y
+                    dist_sq = dx * dx + dy * dy
+                    radius_sq = primary_circle.radius ** 2
+                    
+                    # Find points within circle
+                    roi_indices = np.where(dist_sq <= radius_sq)[0]
+                    
+                    if len(roi_indices) > 0:
+                        roi_x_points.append(frame['x'][roi_indices])
+                        roi_y_points.append(frame['y'][roi_indices])
+                
+                # Combine primary ROI points if any
+                if roi_x_points:
+                    primary_inside_x = np.concatenate(roi_x_points)
+                    primary_inside_y = np.concatenate(roi_y_points)
+                    
+                    # Calculate distances from origin for these points
+                    primary_distances = np.sqrt(primary_inside_x**2 + primary_inside_y**2)
+                    
+                    # Add to inside point counts by distance band
+                    inside_0_10m_count += np.sum(primary_distances < 10.0)
+                    inside_10_20m_count += np.sum((primary_distances >= 10.0) & (primary_distances < 20.0))
+                    inside_20_30m_count += np.sum((primary_distances >= 20.0) & (primary_distances < 30.0))
+            
+            # Secondary ROIs
+            for circle_idx in range(1, len(analyzer.params.circles)):
+                circle = analyzer.params.circles[circle_idx]
+                if not circle.enabled:
+                    continue
+                    
+                prefix = f'roi{circle_idx + 1}'
+                if f'{prefix}_combined_point_count' in metrics and metrics[f'{prefix}_combined_point_count'] > 0:
+                    # Calculate secondary ROI center
+                    angle_rad = math.radians(circle.angle)
+                    circle_center_x = circle.distance * math.sin(angle_rad)
+                    circle_center_y = circle.distance * math.cos(angle_rad)
+                    
+                    # Get all inside ROI points from frames and gather them
+                    roi_x_points = []
+                    roi_y_points = []
+                    
+                    for frame_idx, frame in enumerate(recent_frames):
+                        if len(frame['x']) == 0:
+                            continue
+                        
+                        # Calculate distances to circle center
+                        dx = frame['x'] - circle_center_x
+                        dy = frame['y'] - circle_center_y
+                        dist_sq = dx * dx + dy * dy
+                        radius_sq = circle.radius ** 2
+                        
+                        # Find points within circle
+                        roi_indices = np.where(dist_sq <= radius_sq)[0]
+                        
+                        if len(roi_indices) > 0:
+                            # Filter out points already counted in primary ROI
+                            unique_indices = []
+                            for idx in roi_indices:
+                                point_id = (frame_idx, idx)
+                                if point_id not in all_counted_points:
+                                    unique_indices.append(idx)
+                            
+                            if unique_indices:
+                                unique_indices = np.array(unique_indices)
+                                roi_x_points.append(frame['x'][unique_indices])
+                                roi_y_points.append(frame['y'][unique_indices])
+                    
+                    # Combine secondary ROI points if any
+                    if roi_x_points:
+                        secondary_inside_x = np.concatenate(roi_x_points)
+                        secondary_inside_y = np.concatenate(roi_y_points)
+                        
+                        # Calculate distances from origin for these points
+                        secondary_distances = np.sqrt(secondary_inside_x**2 + secondary_inside_y**2)
+                        
+                        # Add to inside point counts by distance band
+                        inside_0_10m_count += np.sum(secondary_distances < 10.0)
+                        inside_10_20m_count += np.sum((secondary_distances >= 10.0) & (secondary_distances < 20.0))
+                        inside_20_30m_count += np.sum((secondary_distances >= 20.0) & (secondary_distances < 30.0))
+            
+            # Calculate total counts (inside + outside)
+            metrics['outside_roi_band_0_10m_count'] = int(outside_0_10m_count)
+            metrics['outside_roi_band_10_20m_count'] = int(outside_10_20m_count)
+            metrics['outside_roi_band_20_30m_count'] = int(outside_20_30m_count)
+            
+            metrics['inside_roi_band_0_10m_count'] = int(inside_0_10m_count)
+            metrics['inside_roi_band_10_20m_count'] = int(inside_10_20m_count)
+            metrics['inside_roi_band_20_30m_count'] = int(inside_20_30m_count)
+            
+            metrics['total_band_0_10m_count'] = int(outside_0_10m_count + inside_0_10m_count)
+            metrics['total_band_10_20m_count'] = int(outside_10_20m_count + inside_10_20m_count)
+            metrics['total_band_20_30m_count'] = int(outside_20_30m_count + inside_20_30m_count)
+        else:
+            # No points outside ROIs, set all bands to zero
+            metrics['outside_roi_band_0_10m_count'] = 0
+            metrics['outside_roi_band_10_20m_count'] = 0 
+            metrics['outside_roi_band_20_30m_count'] = 0
+            metrics['inside_roi_band_0_10m_count'] = 0
+            metrics['inside_roi_band_10_20m_count'] = 0
+            metrics['inside_roi_band_20_30m_count'] = 0
+            metrics['total_band_0_10m_count'] = 0
+            metrics['total_band_10_20m_count'] = 0
+            metrics['total_band_20_30m_count'] = 0
+        
         # Calculate the effective observed area more accurately
         # First, determine the actual radar coverage area based on max range
         if hasattr(analyzer.params, 'max_range'):
@@ -434,8 +855,12 @@ def compute_multi_frame_metrics(analyzer) -> None:
             outside_area = max(0.01, radar_coverage_area - roi_area)
         else:
             # Fallback calculation if max_range isn't available
-            grid_size_x, grid_size_y = calculate_heatmap_size(analyzer.params)
-            total_area = grid_size_x * grid_size_y * (analyzer.params.heatmap_resolution ** 2)
+            grid_size_x = int(2 * max_range / res) + 2
+            grid_size_y = int(max_range / res) + 2 # Assuming y-axis is 0 to max_range
+            if grid_size_x % 2 == 1: grid_size_x += 1
+            if grid_size_y % 2 == 1: grid_size_y += 1
+            
+            total_area = grid_size_x * grid_size_y * (res ** 2)
             
             # Subtract ROI areas
             roi_area = 0.0

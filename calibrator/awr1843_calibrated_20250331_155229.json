@@ -1,0 +1,12 @@
+{
+  "timestamp": "2025-03-31T15:52:29.020895",
+  "target_distance": 1.5,
+  "calibration_result": "compRangeBiasAndRxChanPhase 0.0786589 -0.23575 -0.60312 -0.23697 -0.60010 -0.37048 -0.47354 -0.40601 -0.43671 -0.40683 -0.57156 -0.37994 -0.62772 -0.52353 -0.35724 -0.49127 -0.32828 -0.96381 0.07141 -0.99789 0.06467 -0.70422 0.36142 -0.67499 0.35214",
+  "quality": {
+    "range_bias": 0.0786589,
+    "bias_quality": "excellent",
+    "phase_variance": 0.11174224557222223,
+    "phase_quality": "good",
+    "overall_quality": "good"
+  }
+}

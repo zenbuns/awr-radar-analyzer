@@ -8,7 +8,7 @@ setup(
     version="1.0.0",
     description="A comprehensive tool for analyzing radar point clouds from an AWR1843 mmWave radar",
     author="Keneth Sarap",
-    author_email="your.email@example.com",
+    author_email="kenethsarap@gmail.com",
     url="https://github.com/zenbuns/awr-radar-analyzer",
     packages=find_packages(),
     include_package_data=True,
