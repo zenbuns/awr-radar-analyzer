@@ -62,6 +62,10 @@ venv.bak/
 *.csv
 *.dat
 */radar_experiment_data/* 
+# Calibration files (often user-specific)
+extrinsics_cr_pnp.yaml
+intrinsics.yaml
+
 # Cursor rules
 .cursor/rules/
 
