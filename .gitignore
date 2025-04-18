@@ -69,3 +69,19 @@ intrinsics.yaml
 # Cursor rules
 .cursor/rules/
 
+extrinsics_cr_pnp0.yaml
+extrinsics_cr_pnp2.yaml
+extrinsics_cr_pnp3.yaml
+extrinsics_cr_pnp6.yaml
+extrinsics_cr_pnp7.yaml
+extrinsics_cr_pnp8.yaml
+extrinsics_cr_pnp9.yaml
+extrinsics_cr_pnp10.yaml
+extrinsics_cr_pnp11.yaml
+extrinsics_cr_pnp12.yaml
+extrinsics_cr_pnp15.yaml
+extrinsics_cr_pnp18.yaml
+extrinsics_cr_pnp19.yaml
+extrinsics_cr_pnp20.yaml
+extrinsics_cr_pnp167.yaml
+CODE_INDEX.md

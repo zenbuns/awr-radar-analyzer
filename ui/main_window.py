@@ -28,11 +28,13 @@ from ui.control_panel import ControlPanel
 from utils.visualization import save_scientific_visualization
 from .styles import DARK_STYLESHEET, Colors, apply_mpl_style
 from ui.point_cloud_view import PointCloudView
+from ui.video_feed_view import VideoFeedView
+from ui.calibration_view import CalibrationView # Import the new view
 
 
 class CombinedView(QWidget):
     """
-    A combined view that shows both scatter plot and heatmap side by side.
+    A combined view that shows both scatter plot and video feed side by side.
     
     This class provides a widget that contains both visualization types
     with toggle options to show/hide each view independently.
@@ -50,7 +52,7 @@ class CombinedView(QWidget):
         # Store reference to parent window
         self.main_window = parent
         self.scatter_view = None
-        self.heatmap_view = None
+        self.video_view = None
         
         # Set up the UI
         self.setup_ui()
@@ -71,7 +73,11 @@ class CombinedView(QWidget):
         self.scatter_toggle.toggled.connect(self.toggle_scatter_view)
         controls_layout.addWidget(self.scatter_toggle)
         
-        # Heatmap toggle removed to hide heatmap from UI
+        # Create video feed toggle
+        self.video_toggle = QCheckBox("Show Video Feed")
+        self.video_toggle.setChecked(True)
+        self.video_toggle.toggled.connect(self.toggle_video_view)
+        controls_layout.addWidget(self.video_toggle)
         
         # Add controls to main layout
         main_layout.addLayout(controls_layout)
@@ -80,27 +86,32 @@ class CombinedView(QWidget):
         self.splitter = QSplitter(Qt.Horizontal)
         main_layout.addWidget(self.splitter, 1)  # Give splitter all available space
     
-    def set_views(self, scatter_view, heatmap_view):
+    def set_views(self, scatter_view, video_view=None):
         """
-        Set the scatter and heatmap views.
+        Set the scatter and video views.
         
         Args:
             scatter_view: ScatterView instance.
-            heatmap_view: HeatmapView instance.
+            video_view: VideoFeedView instance (optional).
         """
         self.scatter_view = scatter_view
-        self.heatmap_view = heatmap_view  # Store reference but don't add to UI
         
-        # Add only scatter view to splitter
+        # Add scatter view to splitter if it exists and isn't already a child
         if self.scatter_view and self.scatter_view.parent() != self.splitter:
             self.splitter.addWidget(self.scatter_view)
         
-        # Heatmap view is kept in memory but not added to the UI
+        # Store and add video view if provided
+        if video_view:
+            self.video_view = video_view
+            if self.video_view.parent() != self.splitter:
+                self.splitter.addWidget(self.video_view)
         
-        # Adjust splitter
-        if self.splitter.count() == 1:
+        # Adjust splitter sizes
+        count = self.splitter.count()
+        if count > 0:
             width = self.splitter.width()
-            self.splitter.setSizes([width])
+            size_per_widget = width // count
+            self.splitter.setSizes([size_per_widget] * count)
     
     def toggle_scatter_view(self, checked):
         """
@@ -111,16 +122,40 @@ class CombinedView(QWidget):
         """
         if self.scatter_view:
             self.scatter_view.setVisible(checked)
+            self._adjust_splitter_sizes()
     
-    def toggle_heatmap_view(self, checked):
+    def toggle_video_view(self, checked):
         """
-        Toggle heatmap view visibility.
+        Toggle video view visibility.
         
         Args:
-            checked: Whether the heatmap view should be visible.
+            checked: Whether the video view should be visible.
         """
-        if self.heatmap_view:
-            self.heatmap_view.setVisible(checked)
+        if self.video_view:
+            self.video_view.setVisible(checked)
+            self._adjust_splitter_sizes()
+    
+    def _adjust_splitter_sizes(self):
+        """Adjust splitter sizes based on visible widgets."""
+        # Count visible widgets
+        visible_count = 0
+        if self.scatter_view and self.scatter_view.isVisible():
+            visible_count += 1
+        if self.video_view and self.video_view.isVisible():
+            visible_count += 1
+        
+        # If there are visible widgets, distribute space evenly
+        if visible_count > 0:
+            width = self.splitter.width()
+            size_per_widget = width // visible_count
+            sizes = []
+            
+            if self.scatter_view:
+                sizes.append(size_per_widget if self.scatter_view.isVisible() else 0)
+            if self.video_view:
+                sizes.append(size_per_widget if self.video_view.isVisible() else 0)
+            
+            self.splitter.setSizes(sizes)
 
 
 class MainWindow(QMainWindow):
@@ -156,6 +191,8 @@ class MainWindow(QMainWindow):
         self.status_bar = None
         self.progress_bar = None
         self.combined_view = None
+        self.video_view = None
+        self.calibration_view = None # Add calibration view property
         
         # State tracking
         self.collection_active = False
@@ -173,8 +210,8 @@ class MainWindow(QMainWindow):
         # Initialize UI
         self.init_ui()
         
-        # Initialize the combined view with the scatter and heatmap views
-        self.combined_view.set_views(self.scatter_view, None)
+        # Initialize the combined view with the scatter and video views
+        self.combined_view.set_views(self.scatter_view, self.video_view)
         
         # Connect signals and slots
         self.connect_signals()
@@ -227,19 +264,23 @@ class MainWindow(QMainWindow):
         self.point_cloud_view = PointCloudView(self)
         tabs.addTab(self.point_cloud_view, "3D View")
         
-        # Create scatter view and heatmap view instances without adding them to tabs
+        # Create scatter view and video view instances
         self.scatter_view = ScatterView(self)
-        # self.heatmap_view = HeatmapView(self) # Removed heatmap view instantiation
+        self.video_view = VideoFeedView(self, self.analyzer)
         
         # Create and add combined view tab
         self.combined_view = CombinedView(self)
         tabs.addTab(self.combined_view, "2D View")
         
+        # Create and add Calibration tab
+        self.calibration_view = CalibrationView(self)
+        tabs.addTab(self.calibration_view, "Calibration")
+        
         # Connect tab change signal to handle view reparenting
         tabs.currentChanged.connect(self.handle_tab_change)
         
-        # Set current tab to combined view
-        tabs.setCurrentIndex(1)
+        # Set current tab to combined view (or Calibration if preferred)
+        tabs.setCurrentIndex(2) # Start on Calibration tab
         
         # Add tabs to visualization layout
         viz_layout.addWidget(tabs)
@@ -2188,27 +2229,32 @@ class MainWindow(QMainWindow):
             print(f"Error handling data reset: {e}")
     
     def closeEvent(self, event):
-        """
-        Handle window close event.
-        
-        Args:
-            event: Close event.
-        """
-        # Stop any ongoing data collection
-        if self.analyzer is not None and self.analyzer.collecting_data:
-            reply = QMessageBox.question(
-                self, "Confirm Exit",
-                "Data collection is in progress. Stop and exit?",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No
-            )
+        """Clean up resources when the window is closed."""
+        try:
+            # Stop update timer
+            if hasattr(self, 'update_timer') and self.update_timer:
+                self.update_timer.stop()
             
-            if reply == QMessageBox.Yes:
-                self.analyzer.stop_data_collection()
-                event.accept()
-            else:
-                event.ignore()
-        else:
-            event.accept()
+            # Stop export thread if running
+            if self.export_thread and self.export_thread.isRunning():
+                self.export_thread.terminate()
+                self.export_thread.wait(1000)  # Wait for thread to terminate
+            
+            # Remove window control cleanup
+            
+            # Stop ROS bag playback if active
+            if hasattr(self, 'analyzer') and self.analyzer:
+                if hasattr(self.analyzer, 'stop_rosbag_playback'):
+                    self.analyzer.stop_rosbag_playback()
+                    
+            # Clear any potentially large data structures to help garbage collection
+            if hasattr(self, 'scatter_view') and self.scatter_view:
+                self.scatter_view.clear_data()
+                
+        except Exception as e:
+            print(f"Error during window close: {e}")
+            
+        event.accept()
     
     @pyqtSlot(float, float, int)
     def configure_heatmap_update_params(self, min_time_interval, max_time_interval, threshold_percent):
@@ -2485,7 +2531,7 @@ class MainWindow(QMainWindow):
         Handle tab change event to manage views.
         
         When the combined view tab is selected, ensure both 
-        scatter and heatmap views are properly set in the combined view.
+        scatter and video views are properly set in the combined view.
         
         Args:
             tab_index: Index of the selected tab.
@@ -2501,8 +2547,13 @@ class MainWindow(QMainWindow):
         # Check if the combined view tab is selected
         if isinstance(selected_tab, CombinedView):
             # Ensure views are set in combined view
-            self.combined_view.set_views(self.scatter_view, self.heatmap_view)
-            self.status_bar.showMessage("2D scatter view mode active")
+            self.combined_view.set_views(self.scatter_view, self.video_view)
+            self.status_bar.showMessage("2D view mode active")
+        # Check if the calibration tab is selected
+        elif isinstance(selected_tab, CalibrationView):
+            self.status_bar.showMessage("Calibration mode active")
+            # Future: Maybe trigger something when entering calibration mode?
+        # Remove the resizable window control tab check
     
     @pyqtSlot(float)
     def set_trail_duration(self, duration):

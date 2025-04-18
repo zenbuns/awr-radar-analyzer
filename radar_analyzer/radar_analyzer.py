@@ -18,6 +18,9 @@ from typing import List, Tuple, Optional, Dict, Any, Sequence, Union
 from PyQt5.QtCore import QObject, pyqtSignal
 
 import numpy as np
+from scipy import stats
+import pandas as pd
+from collections import deque
 import matplotlib.pyplot as plt
 from matplotlib.artist import Artist
 
@@ -108,6 +111,25 @@ class RadarPointCloudAnalyzer(Node):
         # Create signals object for PyQt communication
         self.signals = RadarAnalyzerSignals()
         
+        # --- Parameters for Calibration Point Processing ---
+        self.declare_parameter('buffer_duration_sec', 5.0)
+        self.declare_parameter('processing_time_window_sec', 3.0)
+        self.declare_parameter('max_range_m', 20.0)
+        self.declare_parameter('z_score_threshold', 3.0)
+        self.declare_parameter('min_inlier_points', 5)
+        self.declare_parameter('use_velocity_filter', False)
+        self.declare_parameter('velocity_field_name', 'velocity')
+        
+        # Get calibration processing parameters
+        self.buffer_max_duration_sec = self.get_parameter('buffer_duration_sec').get_parameter_value().double_value
+        self.time_window_sec = self.get_parameter('processing_time_window_sec').get_parameter_value().double_value
+        self.range_threshold_m = self.get_parameter('max_range_m').get_parameter_value().double_value
+        self.z_score_thresh = self.get_parameter('z_score_threshold').get_parameter_value().double_value
+        self.min_inlier_points = self.get_parameter('min_inlier_points').get_parameter_value().integer_value
+        self.use_velocity_filter = self.get_parameter('use_velocity_filter').get_parameter_value().bool_value
+        self.velocity_field = self.get_parameter('velocity_field_name').get_parameter_value().string_value
+        # --- End Calibration Params ---
+        
         # Make the signal accessible directly from this class for easier use
         self.update_playback_position_signal = self.signals.update_playback_position_signal
         self.params = RadarExperimentParams()
@@ -138,6 +160,9 @@ class RadarPointCloudAnalyzer(Node):
             'intensities': np.array([], dtype=np.float32)
         }
         self.multi_frame_metrics = {}
+
+        # Buffer for storing recent PointCloud2 messages for calibration lookup
+        self.point_cloud_buffer = deque()
 
         # Create a more robust QoS profile for better bag playback compatibility
         self.reliable_qos = QoSProfile(
@@ -248,6 +273,24 @@ class RadarPointCloudAnalyzer(Node):
         self.last_pcl_msg_time = self.get_clock().now()
         self.pcl_msg_count += 1
         
+        # Get the timestamp from the message header
+        try:
+            timestamp_sec = msg.header.stamp.sec
+            timestamp_nanosec = msg.header.stamp.nanosec
+            current_timestamp = timestamp_sec + timestamp_nanosec * 1e-9
+            
+            # Add message to buffer for calibration lookup
+            self.point_cloud_buffer.append((current_timestamp, msg))
+            # Prune buffer
+            now_ros = self.get_clock().now()
+            now_sec = now_ros.nanoseconds / 1e9
+            while self.point_cloud_buffer and (now_sec - self.point_cloud_buffer[0][0] > self.buffer_max_duration_sec):
+                self.point_cloud_buffer.popleft()
+            
+        except Exception as e:
+             self.get_logger().warn(f"Could not extract timestamp from PCL message: {e}")
+             current_timestamp = time.time() # Fallback to current time
+        
         # Force UI update during bag playback to ensure visualization
         if hasattr(self, 'is_playing') and self.is_playing:
             self.visible = True  # Ensure visibility during playback
@@ -274,6 +317,7 @@ class RadarPointCloudAnalyzer(Node):
                 self.current_data['y'] = y_array
                 self.current_data['z'] = z_array
                 self.current_data['intensities'] = intensities_array
+                self.current_data['timestamp'] = current_timestamp # Store the timestamp
             
         except Exception as e:
             self.get_logger().error(f"Error processing point cloud: {str(e)}")
@@ -1353,16 +1397,191 @@ class RadarPointCloudAnalyzer(Node):
             
     def update_circle_radius(self, radius: float) -> None:
         """
-        Update the radius of the sampling circle in both scatter and heatmap.
-        
-        This is a wrapper around the update_circle_radius function from the
-        visualizer module that maintains proper error handling.
+        Update the radius of the sampling circle.
         
         Args:
-            radius: New radius for the sampling circle in meters.
+            radius: New circle radius in meters.
         """
-        from radar_analyzer.visualization.visualizer import update_circle_radius as update_radius_func
-        try:
-            update_radius_func(self, radius)
-        except Exception as e:
-            self.get_logger().error(f"Error updating circle radius: {str(e)}")
+        self.params.circle_radius = radius
+        # Update visualization component
+        update_circle_radius(self)
+        self.get_logger().info(f'Sampling circle radius updated to {radius}m')
+
+    # --- Start Methods for Calibration Point Processing (Paper Algorithm 1) --- 
+    def _get_points_from_msgs_in_window(self, center_timestamp: float) -> pd.DataFrame | None:
+        """
+        Retrieves and parses points from buffered PointCloud2 messages
+        within the defined time window. Calculates range.
+        """
+        start_time = center_timestamp - self.time_window_sec / 2
+        end_time = center_timestamp + self.time_window_sec / 2
+        points_list = []
+        relevant_msgs = 0
+        required_fields = {'x', 'y', 'z'}
+
+        # Iterate through a copy of the deque for safety
+        for ts, msg in list(self.point_cloud_buffer):
+            try:
+                if start_time <= ts <= end_time:
+                    relevant_msgs += 1
+                    # Determine required fields based on config
+                    fields_to_read = list(required_fields) # Start with x,y,z
+                    # Check if velocity field *actually* exists in this specific message
+                    msg_field_names = {field.name for field in msg.fields}
+                    if not required_fields.issubset(msg_field_names):
+                        self.get_logger().warn(f"Skipping msg at {ts:.3f}: missing x, y, or z.", throttle_duration_sec=10)
+                        continue # Skip message if core fields missing
+                        
+                    has_velocity = self.use_velocity_filter and self.velocity_field in msg_field_names
+
+                    if has_velocity:
+                        fields_to_read.append(self.velocity_field)
+
+                    # Use standard sensor_msgs_py.point_cloud2 to read points
+                    try:
+                        # Setting skip_nans=True is important
+                        for point_struct in pc2.read_points(msg, field_names=fields_to_read, skip_nans=True):
+                            # point_struct is now a tuple/list of values based on field_names order
+                            # Convert to a dictionary for easier DataFrame creation
+                            point_data = {'timestamp': ts}
+                            # Assuming standard field order (x, y, z, optional_velocity)
+                            point_data['x'] = float(point_struct[0])
+                            point_data['y'] = float(point_struct[1])
+                            point_data['z'] = float(point_struct[2])
+                            if has_velocity:
+                                point_data['velocity'] = float(point_struct[3]) # Assuming velocity is 4th field
+                            else:
+                                point_data['velocity'] = 0.0 # Assign 0 if not present or not used
+
+                            # Calculate range
+                            point_data['range'] = np.sqrt(point_data['x']**2 + point_data['y']**2 + point_data['z']**2)
+                            points_list.append(point_data)
+                    except Exception as e:
+                        self.get_logger().error(f"Error parsing PointCloud2 message from timestamp {ts}: {e}")
+                        # Continue to next message
+            except Exception as e:
+                self.get_logger().error(f"Outer error during PCL message processing loop for timestamp {ts}: {e}")
+
+        if not points_list:
+            self.get_logger().warn(f"No points extracted from {relevant_msgs} messages in window [{start_time:.3f}, {end_time:.3f}]")
+            return None
+
+        self.get_logger().info(f"Extracted {len(points_list)} points from {relevant_msgs} messages in window.")
+        return pd.DataFrame(points_list)
+
+    # --- This is the core method called by CalibrationView --- 
+    def find_sync_corner_reflector_position(self, target_timestamp: float):
+        """
+        Finds the filtered and averaged 3D position of a static Corner Reflector (CR)
+        based on radar PointCloud2 data around a specific timestamp.
+
+        Implements Algorithm 1, lines 5-13 from Cheng et al., arXiv:2307.15264.
+        """
+        self.get_logger().info(f"Requesting CR position near image timestamp {target_timestamp:.3f}")
+        processing_start_time = time.time()
+
+        # --- 1. Data Aggregation & Parsing --- 
+        # Get DataFrame of points within the time window, including calculated range
+        points_df = self._get_points_from_msgs_in_window(target_timestamp)
+
+        if points_df is None or points_df.empty:
+            self.get_logger().warn("No points found in the specified time window.")
+            return None
+        self.get_logger().debug(f"Initial points count: {len(points_df)}")
+
+        # --- 2. Initial Filtering (Static & Range) --- 
+        # Paper implies velocity=0 check first (line 5 hint, line 9 context)
+        if self.use_velocity_filter:
+            # Make sure the velocity column exists (added in _get_points...)
+             if 'velocity' in points_df.columns:
+                 static_mask = np.abs(points_df['velocity']) < 1e-6 # Threshold for static
+                 self.get_logger().debug(f"Points before velocity filter: {len(points_df)}")
+                 points_df = points_df[static_mask].copy()
+                 self.get_logger().debug(f"Points after velocity filter: {len(points_df)}")
+             else:
+                  self.get_logger().warn("Velocity filtering enabled but 'velocity' column missing from extracted points.")
+
+        # Filter by range
+        range_mask = points_df['range'] < self.range_threshold_m
+        self.get_logger().debug(f"Points before range filter: {len(points_df)}")
+        points_df = points_df[range_mask].copy()
+        self.get_logger().debug(f"Points after range filter (<{self.range_threshold_m}m): {len(points_df)}")
+
+
+        if points_df.empty:
+            self.get_logger().warn("No points remaining after static/range filtering.")
+            return None
+
+        # --- 3. Outlier Removal (Z-Score) (Algorithm 1, line 9-10) --- 
+        coords = points_df[['x', 'y', 'z']]
+        if len(coords) < 2: # Need at least 2 points to calculate Z-score reliably
+             self.get_logger().warn(f"Too few points ({len(coords)}) to perform Z-score filtering.")
+             # Depending on requirements, either return None or proceed without Z-score
+             inliers = points_df
+        else:
+            try:
+                # Ensure coords are numeric before zscore
+                coords_numeric = coords.apply(pd.to_numeric, errors='coerce').dropna()
+                if coords_numeric.empty:
+                    self.get_logger().warn("No numeric coordinate data left for Z-score.")
+                    inliers = points_df # Fallback
+                else:
+                    z_scores = np.abs(stats.zscore(coords_numeric))
+                    # Filter based on threshold for all axes simultaneously
+                    all_axes_inliers_mask = np.all(z_scores < self.z_score_thresh, axis=1)
+                    # Apply mask back to the original DataFrame's index that corresponds to numeric data
+                    inliers = points_df.loc[coords_numeric.index[all_axes_inliers_mask]].copy()
+                    self.get_logger().debug(f"Points after Z-score filter (thresh={self.z_score_thresh}): {len(inliers)}")
+            except Exception as e:
+                self.get_logger().error(f"Error during Z-score calculation: {e}. Skipping Z-score filter.")
+                inliers = points_df # Fallback to using points before Z-score
+
+        if inliers.empty:
+            self.get_logger().warn("No points remaining after Z-score filtering.")
+            return None
+        num_inliers = len(inliers)
+
+        # --- 4. Check Minimum Inliers --- 
+        if num_inliers < self.min_inlier_points:
+            self.get_logger().warn(f"Insufficient inliers ({num_inliers}) after filtering (minimum required: {self.min_inlier_points}). Cannot calculate reliable mean.")
+            return None
+
+        # --- 5. Averaging Inliers (Algorithm 1, line 11) --- 
+        mean_position = inliers[['x', 'y', 'z']].mean().to_list() # Calculate mean
+
+        processing_time_ms = (time.time() - processing_start_time) * 1000
+        self.get_logger().info(f"Calculated mean CR position: {tuple(mean_position)} from {num_inliers} inliers. Processing time: {processing_time_ms:.1f} ms")
+        return tuple(mean_position)
+
+    def get_latest_radar_points(self) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+        """Safely returns the latest processed radar point coordinates."""
+        with self.data_lock:
+            if ('x' in self.current_data and self.current_data['x'].size > 0 and
+                'y' in self.current_data and self.current_data['y'].size > 0 and
+                'z' in self.current_data and self.current_data['z'].size > 0):
+                # Return copies to avoid external modification issues
+                return (
+                    self.current_data['x'].copy(),
+                    self.current_data['y'].copy(),
+                    self.current_data['z'].copy()
+                )
+            else:
+                return None # No valid data available
+    # --- End Calibration Point Processing Methods ---
+
+    # --- Placeholder for Checkerboard-based Extrinsic Calibration ---
+    def find_sync_checkerboard_pose(self, target_timestamp: float, time_tolerance: float = 0.1) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+        """
+        (Placeholder) Estimate the 3D pose (rvec, tvec) of the checkerboard 
+        in the radar coordinate system, synchronized with the camera frame.
+
+        Args:
+            target_timestamp: Timestamp of the camera frame.
+            time_tolerance: Max allowed time difference.
+
+        Returns:
+            Tuple (rvec, tvec) representing the board's pose in radar frame, or None.
+        """
+        self.get_logger().warn(f"Checkerboard pose detection not yet implemented. Called with timestamp {target_timestamp:.3f}")
+        return None
+    # --- End Placeholder ---
