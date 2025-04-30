@@ -1,0 +1,111 @@
+```mermaid
+graph TD
+
+    subgraph Initialization
+        A[main.py: Start] --> B{Parse Args};
+        B --> C[Load Config default_params.yaml / --config];
+        C --> D[Apply Args to Config];
+        D --> E[Setup QApplication Style];
+        E --> F{Initialize ROS? viz-only?};
+    end
+
+    subgraph ROS_Backend [ROS Backend if enabled]
+        F -- Yes --> G[rclpy.init];
+        G --> H[Create RadarPointCloudAnalyzer Node radar_analyzer.core];
+        H -- Subscribes --> PCL[ROS Topic: PointCloud2];
+        H -- Subscribes --> TRK[ROS Topic: MarkerArray];
+        H -- Subscribes --> OCC[ROS Topic: OccupancyGrid];
+        H -- Creates Subscription --> IMG[ROS Topic: Image Camera];
+        H -- Creates Subscription --> YOLO[ROS Topic: DetectionArray Tracking];
+        H --> I[Configure Analyzer from config];
+        I --> J[Start ROS Executor Thread executor.spin];
+    end
+
+    subgraph GUI_Setup [GUI Setup & Components]
+        F -- No --> K[Create MainWindow ui/main_window];
+        J --> K;
+        K -- Receives --> H_ref[Analyzer Node Ref];
+        K --> L[Create ControlPanel control_panel.py];
+        K --> CV[Create CalibrationView ui/calibration_view.py];
+        K --> M[Create Visualization Plots Heatmap, Scatter, etc.];
+        L -- Signals --> K;
+        CV -- Signals/Calls --> K;
+        CV -- Accesses --> H_ref;
+        %% CalibrationView uses analyzer directly
+        K -- Connects Signals --> H_ref_Calls{Analyzer Methods};
+        %% MainWindow connects signals to Analyzer methods
+    end
+
+    subgraph Runtime_ControlPanel [Runtime: Control Panel Interaction]
+        UserCP[User Interacts with ControlPanel] --> L;
+        L -- start_collection --> K;
+        K -- Calls --> H_ref_Calls -- start_collection --> H;
+        L -- stop_collection --> K;
+        K -- Calls --> H_ref_Calls -- stop_collection --> H;
+        L -- visualization_params_changed --> K;
+        K -- Calls --> H_ref_Calls -- set_viz_params --> H;
+        H -- Update Metrics/Status --> K --> L;
+        %% Backend updates panel
+    end
+
+    subgraph Runtime_CalibrationView [Runtime: Calibration View Interaction]
+        UserCV[User Interacts with CalibrationView] --> CV;
+        IMG -- Image Data --> H -- Image Data --> CV;
+        YOLO -- DetectionArray --> H -- YOLO Data --> CV;
+        CV -- Request CR Point get_sync_cr_position... --> H_ref;
+        H -- CR Data --> CV;
+        CV -- Run Intrinsics cv2.calibrateCamera --> CV;
+        CV -- Run Extrinsics cv2.solvePnPRansac --> CV;
+        CV -- Request Live Points get_latest_radar_points --> H_ref;
+        H -- Live Points --> CV;
+        CV -- Load/Save YAML --> Files[intrinsics/extrinsics.yaml];
+        CV -- Updates Display --> CV_Display[Camera Feed Label];
+    end
+
+    subgraph Runtime_BackendProcessing [Runtime: Backend Data Processing]
+       PCL & TRK & OCC -- Data --> H;
+       H --> State[Update Internal State Heatmap, Filters, etc.];
+       State --> VizUpdate[Update Visualization Data];
+       VizUpdate --> K --> M;
+       %% Update plots in MainWindow
+    end
+
+    subgraph App_Loop [Application Loop & Shutdown]
+        K --> EventLoop[QApplication.exec_];
+        EventLoop -- Exit --> Shutdown{Shutdown ROS?};
+        Shutdown -- Yes --> J_Stop[executor.shutdown];
+        J_Stop --> H_Destroy[analyzer.destroy_node];
+        H_Destroy --> G_Shutdown[rclpy.shutdown];
+    end
+
+    Initialization --> GUI_Setup;
+    GUI_Setup --> App_Loop;
+
+    %% Link subgraphs where needed
+    ROS_Backend --> GUI_Setup;
+    %% Analyzer node ref passed
+    Runtime_ControlPanel --> Runtime_BackendProcessing;
+    %% Commands affect backend
+    Runtime_CalibrationView --> Runtime_BackendProcessing;
+    %% Requests data from backend
+    Runtime_BackendProcessing --> Runtime_ControlPanel;
+    %% Backend updates panel
+    Runtime_BackendProcessing --> Runtime_CalibrationView;
+    %% Backend updates calibration view
+
+    %% Styling Definitions
+    classDef ros fill:#f9f,stroke:#333,stroke-width:1px;
+    classDef gui fill:#ccf,stroke:#333,stroke-width:1px;
+    classDef logic fill:#cfc,stroke:#333,stroke-width:1px;
+    classDef topic fill:#fcc,stroke:#333,stroke-width:1px;
+    classDef user fill:#eee,stroke:#333,stroke-width:1px;
+    classDef file fill:#eee,stroke:#333,stroke-width:1px,stroke-dasharray: 5 5;
+
+    %% Apply Styles
+    class H,H_ref,H_ref_Calls,J,J_Stop,H_Destroy,G_Shutdown,State,VizUpdate ros;
+    class K,L,CV,M,CV_Display,EventLoop gui;
+    class A,B,C,D,E,F,G,I logic;
+    class PCL,TRK,OCC,IMG,YOLO topic;
+    class UserCP,UserCV user;
+    class Files file;
+```

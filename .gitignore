@@ -85,3 +85,23 @@ extrinsics_cr_pnp19.yaml
 extrinsics_cr_pnp20.yaml
 extrinsics_cr_pnp167.yaml
 CODE_INDEX.md
+extrinsics_cr_pnp0 copy.yaml
+extrinsics_cr_pnp00.yaml
+extrinsics_cr_pnp03.yaml
+extrinsics_cr_pnp05.yaml
+extrinsics_cr_pnp06.yaml
+extrinsics_cr_pnp00007.yaml
+extrinsics_cr_pnp007.yaml
+extrinsics_cr_pnp008.yaml
+extrinsics_cr_pnp009.yaml
+extrinsics_cr_pnp0010.yaml
+extrinsics_cr_pnp21.yaml
+extrinsics_cr_pnp0031.yaml
+extrinsics_cr_pnp051.yaml
+extrinsics_cr_pnp089.yaml
+extrinsics_cr_pnp00091.yaml
+
+# ROS 2 Build/Install artifacts
+log/
+install/
+utils/ros_subscriber.py

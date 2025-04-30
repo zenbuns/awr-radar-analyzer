@@ -5,28 +5,60 @@ Calibration view widget for managing intrinsic and extrinsic parameters.
 """
 
 import os
+import sys # <-- Add sys import for path debugging
 import yaml
 import numpy as np
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel, 
                              QLineEdit, QPushButton, QFileDialog, QMessageBox,
                              QFormLayout, QSpacerItem, QSizePolicy, QSplitter, QSpinBox, QFrame,
                              QListWidget, QAbstractItemView, QListWidgetItem, QApplication, QCheckBox)
-from PyQt5.QtCore import Qt, pyqtSlot, QTimer
+from PyQt5.QtCore import Qt, pyqtSlot, QTimer, pyqtSignal # <-- Added pyqtSignal
 from PyQt5.QtGui import QImage, QPixmap
 import cv2
 import time
 import traceback
+import collections # <-- Import collections for deque
 from scipy.optimize import least_squares # For LM refinement (optional)
 import matplotlib.cm as cm
 import matplotlib.colors as mcolors
+from scipy.stats import median_abs_deviation, zscore
+# --- Add scikit-learn import ---
+from sklearn.cluster import DBSCAN
+from sklearn.neighbors import NearestNeighbors # Added for outlier removal
+# --- End Add ---
+try:
+    import numba
+    from numba import njit
+    NUMBA_AVAILABLE = True
+except ImportError:
+    NUMBA_AVAILABLE = False
+    print("Warning: Numba not found. MAD filtering will run unaccelerated.")
 
 # Check for ROS2 availability and dependencies
 ROS2_AVAILABLE = False
 CV_BRIDGE_AVAILABLE = False
 CvBridge = None
+# --- Add YOLO Msg Import ---
+YOLO_MSGS_AVAILABLE = False
+DetectionArray = None
+# --- End Add ---
 try:
     from rclpy.node import Node
     from sensor_msgs.msg import Image
+    # --- Add YOLO Msg Import Attempt ---
+    try:
+        from yolo_msgs.msg import DetectionArray as DetectionArray_import
+        DetectionArray = DetectionArray_import
+        YOLO_MSGS_AVAILABLE = True
+        print("CalibrationView: yolo_msgs imported successfully.")
+    except ImportError as e:
+        print(f"CalibrationView: yolo_msgs import error: {e}. YOLO overlay will be unavailable.")
+        YOLO_MSGS_AVAILABLE = False
+        # --- Add print traceback on error ---
+        import traceback
+        traceback.print_exc()
+        # --- End Add ---
+    # --- End Add ---
     ROS2_AVAILABLE = True
     try:
         import importlib.util
@@ -54,6 +86,39 @@ try:
 except ImportError as e:
     print(f"CalibrationView: ROS2 core dependencies import error: {e}")
 
+# --- Configuration Structs ---
+class Param:
+    """ Equivalent to C++ param struct for filter/processing config. """
+    def __init__(self, name="", num=0, if_channel=False, if_reverse=False,
+                 lower_limit=-np.inf, upper_limit=np.inf, eps=0.0):
+        self.name = name
+        self.num = num # Maybe axis index (0=x, 1=y, 2=z)?
+        self.if_channel = if_channel # Unclear usage from C++
+        self.if_reverse = if_reverse # For box filter (keep points inside or outside)
+        self.lower_limit = lower_limit
+        self.upper_limit = upper_limit
+        self.eps = eps # Unclear usage from C++
+
+class Config:
+    """ Equivalent to C++ config struct holding multiple Params. """
+    def __init__(self):
+        self.x = Param(name="x", num=0)
+        self.y = Param(name="y", num=1)
+        self.z = Param(name="z", num=2)
+        self.i = Param(name="intensity") # Assuming 'i' is intensity
+
+# Example usage:
+# filter_config = Config()
+# filter_config.x.lower_limit = -5.0
+# filter_config.x.upper_limit = 5.0
+# filter_config.y.lower_limit = 0.1
+# filter_config.y.upper_limit = 10.0
+# filter_config.z.lower_limit = -1.0
+# filter_config.z.upper_limit = 1.0
+# filter_config.x.if_reverse = False # Keep points inside the box limits
+# --- End Configuration Structs ---
+
+
 class CalibrationView(QWidget):
     """
     Widget for handling camera intrinsic and radar-camera extrinsic calibration,
@@ -62,11 +127,16 @@ class CalibrationView(QWidget):
     # --- Decay config ---
     RADAR_DECAY_SECONDS = 1.5   # How long (seconds) points remain visible (reduced for better sync)
     RADAR_DECAY_TYPE = 'exp'    # 'exp' for exponential, 'linear' for linear fade
+
+    # --- Signal for thread-safe frame update ---
+    new_frame_signal = pyqtSignal(np.ndarray, float) # frame (np.ndarray), timestamp (float)
+
     def __init__(self, parent=None):
         """Initialize the CalibrationView widget."""
         super().__init__(parent)
         self.main_window = parent
-        self.radar_projection_history = []  # Each entry: (u, v, color, timestamp)
+        # FIX 4: Corrected history comment
+        self.radar_projection_history = []  # Each entry: (u, v, timestamp)
 
         # Store intrinsic parameters - Initialize with new user-provided values
         self.camera_matrix = np.array([
@@ -103,6 +173,18 @@ class CalibrationView(QWidget):
         self.frame_received = False
         self.camera_subscription = None
         self.cv_bridge = None
+        # --- Add YOLO attributes ---
+        self.yolo_subscription = None
+        self.latest_yolo_detections = None # Stores the latest yolo_msgs/DetectionArray
+        # --- Change for Tracking --- 
+        self.latest_yolo_tracking = None # Stores the latest tracking message
+        self.yolo_track_counts = {} # Stores history: {track_id: deque([count1, count2,...])}
+        self.YOLO_COUNT_HISTORY_LEN = 10 # Number of frames for moving average
+        self.YOLO_TRACK_TIMEOUT = 1.0 # Seconds before removing an old track ID
+        self.last_yolo_update_time = {} # {track_id: timestamp}
+        self.yolo_tracking_topic = "/yolo/tracking" # Switched topic
+        # --- End Change ---
+        # --- End Add ---
         if CV_BRIDGE_AVAILABLE and CvBridge:
             try:
                 self.cv_bridge = CvBridge()
@@ -112,6 +194,9 @@ class CalibrationView(QWidget):
 
         self.setup_ui()
         self.init_camera_subscriber()
+        # --- Add YOLO subscriber init ---
+        self.init_yolo_subscriber()
+        # --- End Add ---
         # Ensure set_intrinsics is called with the new defaults for proper validation and display
         self.set_intrinsics(self.camera_matrix, self.dist_coeffs)
         self.update_intrinsic_display() # Update display with initial/default values
@@ -123,6 +208,8 @@ class CalibrationView(QWidget):
         self.manual_rotate_step_deg = 0.5  # degrees for rotation
         self.manual_adjust_instr_label = None  # set in setup_ui
 
+        # FIX 6: Connect the signal to the slot
+        self.new_frame_signal.connect(self._update_latest_frame)
 
     def setup_ui(self):
         """Set up the UI components for the calibration tab."""
@@ -286,6 +373,17 @@ class CalibrationView(QWidget):
         extrinsic_controls_layout.addWidget(self.show_live_projection_checkbox)
         # --- End Checkbox ---
 
+        # --- Add Checkbox for YOLO Overlay ---
+        self.show_yolo_checkbox = QCheckBox("Show YOLO Detections & Counts")
+        self.show_yolo_checkbox.setChecked(False) # Default to off
+        self.show_yolo_checkbox.setToolTip("Toggle the display of YOLO bounding boxes and radar point counts within them.")
+        # Disable if YOLO msgs are not available
+        if not YOLO_MSGS_AVAILABLE:
+            self.show_yolo_checkbox.setEnabled(False)
+            self.show_yolo_checkbox.setToolTip("YOLO overlay unavailable (yolo_msgs not found or import error).")
+        extrinsic_controls_layout.addWidget(self.show_yolo_checkbox)
+        # --- End Add ---
+
         # --- Manual Adjustment Controls (Sliders) ---
         from PyQt5.QtWidgets import QSlider, QGridLayout
         self.slider_group = QGroupBox("Manual Adjustment (Sliders)")
@@ -301,6 +399,7 @@ class CalibrationView(QWidget):
             slider.setMinimum(0)
             slider.setMaximum(400)
             slider.setValue(200)
+            # FIX 5: Capture minv/maxv by value in lambda
             slider.valueChanged.connect(lambda val, idx=i, minv=minv, maxv=maxv: self._slider_update_translation(idx, val, minv, maxv))
             slider_layout.addWidget(label, i, 0)
             slider_layout.addWidget(slider, i, 1)
@@ -317,6 +416,7 @@ class CalibrationView(QWidget):
             slider.setMinimum(0)
             slider.setMaximum(600)
             slider.setValue(300)
+            # FIX 5: Capture minv/maxv by value in lambda
             slider.valueChanged.connect(lambda val, idx=i, minv=minv, maxv=maxv: self._slider_update_rotation(idx, val, minv, maxv))
             slider_layout.addWidget(label, i+3, 0)
             slider_layout.addWidget(slider, i+3, 1)
@@ -600,7 +700,7 @@ class CalibrationView(QWidget):
             self._create_test_pattern()
 
     def _image_callback(self, msg):
-        """Callback function for ROS2 image messages."""
+        """Callback function for ROS2 image messages. EMITS signal."""
         try:
             timestamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
             cv_image = None
@@ -615,16 +715,29 @@ class CalibrationView(QWidget):
                 gray_image = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width)
                 cv_image = cv2.cvtColor(gray_image, cv2.COLOR_GRAY2BGR)
             else:
+                # Maybe log unsupported encoding?
                 return
 
             if cv_image is not None:
-                self.latest_camera_frame = cv_image
-                self.latest_camera_timestamp = timestamp
-                self.frame_received = True
-                # REMOVE Projection update from here
-                # self.project_current_pairs_for_display()
+                # Emit signal instead of assigning directly
+                self.new_frame_signal.emit(cv_image, timestamp)
+
         except Exception as e:
             print(f"CalibrationView: Error processing image message: {e}")
+            # Optionally print traceback:
+            # import traceback
+            # traceback.print_exc()
+
+    @pyqtSlot(np.ndarray, float)
+    def _update_latest_frame(self, frame, timestamp):
+        """Slot to receive and store the latest frame and timestamp."""
+        self.latest_camera_frame = frame
+        self.latest_camera_timestamp = timestamp
+        self.frame_received = True
+        # Note: We might not need to trigger update_camera_display here,
+        # as the timer already does that periodically. If updates seem laggy,
+        # uncomment the line below, but be mindful of performance.
+        # self.update_camera_display()
 
     def update_camera_display(self):
         """Update the camera feed label with the latest frame and overlays."""
@@ -641,6 +754,11 @@ class CalibrationView(QWidget):
             # --- Draw LIVE radar projections if enabled ---
             if self.show_live_projection_checkbox.isChecked(): # <-- CHECK THE NEW CHECKBOX
                 self.draw_live_radar_projections(frame)
+
+            # --- Draw YOLO Overlay if enabled ---
+            if self.show_yolo_checkbox.isChecked():
+                self.draw_yolo_overlay(frame)
+            # --- End Add ---
 
             # Convert frame to QPixmap
             h, w = frame.shape[:2]
@@ -799,7 +917,7 @@ class CalibrationView(QWidget):
     def get_radar_cr_point_at_timestamp(self, timestamp):
         """
         Find the synchronized radar corner reflector position at the given timestamp,
-        applying Z-score outlier filtering as described in Cheng et al., arXiv:2307.15264.
+        applying velocity & range gating and robust MAD-based outlier filtering.
         Returns the mean (x, y, z) of inlier radar points, or None if insufficient data.
         """
         analyzer = None
@@ -853,8 +971,6 @@ class CalibrationView(QWidget):
                 if radar_points.shape[1] != 3:
                     print(f"[Radar Sync] Radar points shape unexpected: {radar_points.shape}")
                     return None
-
-                # --- Z-score filtering for outlier rejection ---
                 if radar_points.shape[0] < 1:
                     print("[Radar Sync] No radar points after normalization.")
                     return None
@@ -862,52 +978,59 @@ class CalibrationView(QWidget):
                     print(f"[Radar Sync] Only one radar point found: {radar_points[0]}")
                     self.last_radar_cr_metrics.update({'raw': 1, 'inliers': 1, 'std': (0.0, 0.0, 0.0)})
                     return tuple(radar_points[0])
-
                 x, y, z = radar_points[:, 0], radar_points[:, 1], radar_points[:, 2]
-
-                # Adaptive Z-score thresholding
                 n_points = radar_points.shape[0]
-                if n_points >= 10:
-                    z_thr = 2.0  # Stricter if many points
-                elif n_points >= 5:
-                    z_thr = 2.5
-                else:
-                    z_thr = 3.0  # More relaxed if few points
-
-                z_x = np.abs((x - np.median(x)) / (np.std(x) + 1e-8))
-                z_y = np.abs((y - np.median(y)) / (np.std(y) + 1e-8))
-                z_z = np.abs((z - np.median(z)) / (np.std(z) + 1e-8))
-                inliers = (z_x < z_thr) & (z_y < z_thr) & (z_z < z_thr)
+                mad_thresh = 3.5
+                # --- Robust MAD-based outlier rejection (Numba-accelerated if available) ---
+                # if NUMBA_AVAILABLE and mad_mask_numba is not None:
+                #     med_x, mad_x = np.median(x), median_abs_deviation(x, scale='normal')
+                #     med_y, mad_y = np.median(y), median_abs_deviation(y, scale='normal')
+                #     med_z, mad_z = np.median(z), median_abs_deviation(z, scale='normal')
+                #     mask_x = mad_mask_numba(x, med_x, mad_x, mad_thresh)
+                #     mask_y = mad_mask_numba(y, med_y, mad_y, mad_thresh)
+                #     mask_z = mad_mask_numba(z, med_z, mad_z, mad_thresh)
+                #     inliers = mask_x & mask_y & mask_z
+                # else:
+                #     mask_x = mad_outlier_mask(x, mad_thresh)
+                #     mask_y = mad_outlier_mask(y, mad_thresh)
+                #     mask_z = mad_outlier_mask(z, mad_thresh)
+                #     inliers = mask_x & mask_y & mask_z
+                 
+                # --- Z-Score based outlier rejection (as per paper) ---
+                z_thresh = 3.0 # Standard Z-Score threshold
+                mask_x = z_score_outlier_mask(x, thresh=z_thresh)
+                mask_y = z_score_outlier_mask(y, thresh=z_thresh)
+                mask_z = z_score_outlier_mask(z, thresh=z_thresh)
+                inliers = mask_x & mask_y & mask_z
+                print(f"[Radar Sync] Applying Z-Score filtering (thresh={z_thresh:.1f})...")
+                 
                 x, y, z = x[inliers], y[inliers], z[inliers]
-                min_inliers = 3
+                min_inliers = 3 # Keep minimum inlier requirement
                 if len(x) < min_inliers:
-                    print(f"[Radar Sync] Too few radar points after Z-score filtering. Inliers: {len(x)} (required: {min_inliers})")
-                    # Update metrics for feedback
-                    self.last_radar_cr_metrics.update({'inliers': len(x)})
+                    print(f"[Radar Sync] Too few radar points after Z-Score filtering. Inliers: {len(x)} (required: {min_inliers})")
+                    self.last_radar_cr_metrics.update({'inliers': len(x)}) # Update inliers count even if returning None
                     return None
-
-                # Use median for robust position estimation
-                median_x, median_y, median_z = float(np.median(x)), float(np.median(y)), float(np.median(z))
+ 
+                # --- Calculate MEAN of inliers (as per paper) --- 
+                mean_x = float(np.mean(x))
+                mean_y = float(np.mean(y))
+                mean_z = float(np.mean(z))
                 std_x, std_y, std_z = float(np.std(x)), float(np.std(y)), float(np.std(z))
-                print(f"[Radar Sync] Returning median CR position: ({median_x:.3f}, {median_y:.3f}, {median_z:.3f}) | StdDev: ({std_x:.4f}, {std_y:.4f}, {std_z:.4f}) | Inliers: {len(x)}")
-                # Update metrics for feedback (if not already provided by rich interface)
-                if self.last_radar_cr_metrics['inliers'] == 0: # Check if not set by rich interface
+                print(f"[Radar Sync] Returning MEAN CR position: ({mean_x:.3f}, {mean_y:.3f}, {mean_z:.3f}) | StdDev: ({std_x:.4f}, {std_y:.4f}, {std_z:.4f}) | Inliers: {len(x)} after Z-Score filtering")
+                if self.last_radar_cr_metrics['inliers'] == 0:
                     self.last_radar_cr_metrics['inliers'] = len(x)
                 if self.last_radar_cr_metrics['std'] is None:
                     self.last_radar_cr_metrics['std'] = (std_x, std_y, std_z)
-
-                return (median_x, median_y, median_z)
-
+                return (mean_x, mean_y, mean_z)
             except Exception as e:
                 print(f"[Radar Sync] Error during radar CR point retrieval/filtering: {e}")
                 import traceback
                 traceback.print_exc()
-                self.last_radar_cr_metrics.update({'dt': None, 'raw': 0, 'inliers': 0, 'std': None}) # Reset on error
+                self.last_radar_cr_metrics.update({'dt': None, 'raw': 0, 'inliers': 0, 'std': None})
                 return None
         else:
             print("[Radar Sync] Analyzer node or 'find_sync_corner_reflector_position' method not found.")
             return None
-
 
     @pyqtSlot()
     def remove_selected_pair(self):
@@ -975,13 +1098,24 @@ class CalibrationView(QWidget):
         object_points = np.array([pair[0] for pair in self.point_pairs], dtype=np.float64)
         image_points = np.array([pair[1] for pair in self.point_pairs], dtype=np.float64)
         K = self.camera_matrix.astype(np.float64)
-        D = self.dist_coeffs.astype(np.float64)
+        D = self.dist_coeffs.astype(np.float64).flatten() # FLATTEN HERE
+
+        # --- Add Check: Point Distribution ---
+        points_ok, dist_msg = self._check_point_distribution(object_points, image_points)
+        if not points_ok:
+            QMessageBox.warning(self, "Poor Point Distribution", dist_msg)
+            return
+        # --- End Check ---
 
         # --- Step 1: RANSAC PnP (Try both ITERATIVE and SQPnP) ---
         best_rvec_ransac, best_tvec_ransac = None, None
         min_ransac_inlier_error = float('inf')
         best_ransac_inliers = None
-        best_method = None
+        # best_method = None # We'll follow a fixed sequence now
+        # FIX 3: Initialize variables before try block
+        success_it = False
+        inliers_it = None
+        rvec_it, tvec_it = None, None # Also init these for potential use in fallback
 
         reprojection_error_threshold = 8.0 # pixels
         confidence = 0.99
@@ -998,79 +1132,160 @@ class CalibrationView(QWidget):
                 flags=cv2.SOLVEPNP_ITERATIVE
             )
             if success_it and inliers_it is not None and len(inliers_it) >= min_points:
-                print(f"  ITERATIVE succeeded with {len(inliers_it)} inliers.")
-                obj_inliers = object_points[inliers_it.flatten()]
-                img_inliers = image_points[inliers_it.flatten()]
-                projected_inliers, _ = cv2.projectPoints(obj_inliers, rvec_it, tvec_it, K, D)
-                if projected_inliers is not None:
-                    errors_inliers = np.linalg.norm(img_inliers - projected_inliers.reshape(-1, 2), axis=1)
-                    avg_inlier_error = np.mean(errors_inliers)
-                    print(f"  ITERATIVE Inlier Avg Reproj Error: {avg_inlier_error:.4f} px")
-                    # Prefer method with more inliers, then lower error
-                    if len(inliers_it) > (len(best_ransac_inliers) if best_ransac_inliers is not None else 0) or \
-                       (len(inliers_it) == (len(best_ransac_inliers) if best_ransac_inliers is not None else 0) and avg_inlier_error < min_ransac_inlier_error):
-                        min_ransac_inlier_error = avg_inlier_error
-                        best_rvec_ransac = rvec_it
-                        best_tvec_ransac = tvec_it
-                        best_ransac_inliers = inliers_it
-                        best_method = "ITERATIVE"
-                else:
-                    print(f"  Warning: Could not project inliers for ITERATIVE.")
-            else:
-                print(f"  ITERATIVE failed or found too few inliers ({len(inliers_it) if inliers_it is not None else 0}).")
-        except cv2.error as e:
-            print(f"  OpenCV Error during ITERATIVE RANSAC: {e}")
-        except Exception as e:
-            print(f"  Unexpected Error during ITERATIVE RANSAC: {e}")
+                print(f"RANSAC (ITERATIVE) succeeded with {len(inliers_it)} inliers.")
+                inlier_indices = inliers_it.flatten()
+                object_points_inliers = object_points[inlier_indices]
+                image_points_inliers = image_points[inlier_indices]
 
-        # RANSAC Method 2: SQPnP (Requires OpenCV >= 4.5.1)
-        print("\nRunning RANSAC PnP (cv2.SOLVEPNP_SQPNP)...")
-        try:
-            success_sq, rvec_sq, tvec_sq, inliers_sq = cv2.solvePnPRansac(
-                object_points, image_points, K, D,
-                iterationsCount=max_iterations,
-                reprojectionError=reprojection_error_threshold,
-                confidence=confidence,
-                flags=cv2.SOLVEPNP_SQPNP
-            )
-            if success_sq and inliers_sq is not None and len(inliers_sq) >= min_points:
-                print(f"  SQPnP succeeded with {len(inliers_sq)} inliers.")
-                obj_inliers = object_points[inliers_sq.flatten()]
-                img_inliers = image_points[inliers_sq.flatten()]
-                projected_inliers, _ = cv2.projectPoints(obj_inliers, rvec_sq, tvec_sq, K, D)
-                if projected_inliers is not None:
-                    errors_inliers = np.linalg.norm(img_inliers - projected_inliers.reshape(-1, 2), axis=1)
-                    avg_inlier_error = np.mean(errors_inliers)
-                    print(f"  SQPnP Inlier Avg Reproj Error: {avg_inlier_error:.4f} px")
-                    # Prefer method with more inliers, then lower error
-                    if best_method is None or \
-                       len(inliers_sq) > (len(best_ransac_inliers) if best_ransac_inliers is not None else 0) or \
-                       (len(inliers_sq) == (len(best_ransac_inliers) if best_ransac_inliers is not None else 0) and avg_inlier_error < min_ransac_inlier_error):
-                        min_ransac_inlier_error = avg_inlier_error
-                        best_rvec_ransac = rvec_sq
-                        best_tvec_ransac = tvec_sq
-                        best_ransac_inliers = inliers_sq
-                        best_method = "SQPnP"
+                # --- Step 2: LM Optimization (using RANSAC inliers) --- 
+                print("\nPerforming LM optimization using RANSAC inliers...")
+                try:
+                    # Use solvePnP with SOLVEPNP_ITERATIVE on inliers
+                    success_lm, rvec_lm, tvec_lm = cv2.solvePnP(
+                        object_points_inliers, image_points_inliers, K, D,
+                        # rvec=rvec_it, # Optionally use RANSAC result as guess? Paper doesn't specify.
+                        # tvec=tvec_it,
+                        # useExtrinsicGuess=False, # Start LM fresh on inliers
+                        flags=cv2.SOLVEPNP_ITERATIVE
+                    )
+                    if not success_lm:
+                         print("Warning: LM optimization step failed. Using initial RANSAC result for SQPnP guess.")
+                         # Use the raw RANSAC result if LM fails
+                         rvec_lm, tvec_lm = rvec_it, tvec_it 
+                    else:
+                         print("LM optimization step successful.")
+                         # Project inliers with LM result for error check
+                         projected_lm, _ = cv2.projectPoints(object_points_inliers, rvec_lm, tvec_lm, K, D)
+                         if projected_lm is not None:
+                             errors_lm = np.linalg.norm(image_points_inliers - projected_lm.reshape(-1, 2), axis=1)
+                             avg_error_lm = np.mean(errors_lm)
+                             print(f"  LM Inlier Avg Reproj Error: {avg_error_lm:.4f} px")
+                             
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    print(f"Error during LM optimization: {e}. Using initial RANSAC result for SQPnP guess.")
+                    # Fallback to the RANSAC result if LM crashes
+                    rvec_lm, tvec_lm = rvec_it, tvec_it
+
+                # --- Step 3: SQPnP (using LM result as guess on inliers) --- 
+                print("\nPerforming SQPnP using RANSAC inliers and LM result as guess...")
+                try:
+                    sqpnp_available = hasattr(cv2, 'SOLVEPNP_SQPNP')
+                    if sqpnp_available:
+                        success_sq, rvec_final, tvec_final = cv2.solvePnP(
+                            object_points_inliers, image_points_inliers, K, D,
+                            rvec=rvec_lm.copy(), # Use LM result as guess
+                            tvec=tvec_lm.copy(),
+                            useExtrinsicGuess=True, 
+                            flags=cv2.SOLVEPNP_SQPNP
+                        )
+                        if not success_sq:
+                            print("Warning: SQPnP step failed. Falling back to LM result.")
+                            rvec_final, tvec_final = rvec_lm, tvec_lm # Fallback to LM
+                        else:
+                            print("SQPnP step successful.")
+                            # Project inliers with SQPnP result for error check
+                            projected_sq, _ = cv2.projectPoints(object_points_inliers, rvec_final, tvec_final, K, D)
+                            if projected_sq is not None:
+                                errors_sq = np.linalg.norm(image_points_inliers - projected_sq.reshape(-1, 2), axis=1)
+                                avg_error_sq = np.mean(errors_sq)
+                                print(f"  SQPnP Inlier Avg Reproj Error: {avg_error_sq:.4f} px")
+                    else:
+                        print("cv2.SOLVEPNP_SQPNP not available. Using LM result as final.")
+                        rvec_final, tvec_final = rvec_lm, tvec_lm # Fallback to LM if SQPnP not present
+                        
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    print(f"Error during SQPnP step: {e}. Falling back to LM result.")
+                    rvec_final, tvec_final = rvec_lm, tvec_lm # Fallback to LM on error
+
+            # --- Store Final Results (with re-orthogonalization) --- 
+            # (Keep the re-orthogonalization as it ensures valid rotation)
+            R_mat_final, _ = cv2.Rodrigues(rvec_final)
+            # Re-orthogonalize R to ensure it's a valid rotation matrix
+            try:
+                u, _, vh = np.linalg.svd(R_mat_final)
+                R_check = u @ vh
+                # --- Fix: Ensure proper rotation (det=+1) ---
+                if np.linalg.det(R_check) < 0:
+                     # Flip the sign of the last column of u before reconstructing.
+                     u[:, -1] *= -1
+                     R_check = u @ vh
+                     print("Applied SVD re-orthogonalization and correction to final rotation matrix (det=+1).")
                 else:
-                    print(f"  Warning: Could not project inliers for SQPnP.")
+                     print("Applied SVD re-orthogonalization to final rotation matrix.")
+                # --- End Fix ---
+                R_mat_final = R_check
+            except np.linalg.LinAlgError:
+                print("Warning: SVD for re-orthogonalization failed. Using original R matrix.")
+            self.extrinsic_R = R_mat_final
+            self.extrinsic_T = tvec_final
+
+            # --- Calculate Final Reprojection Error (using ALL points with the FINAL R, T) ---
+            print("\nCalculating final reprojection error using ALL points...")
+            # FIX 7: Ensure R is contiguous before Rodrigues
+            rvec_final_reorth, _ = cv2.Rodrigues(np.ascontiguousarray(self.extrinsic_R)) # Get rvec from potentially re-orthogonalized R
+            # IMPORTANT: Use the original full object_points and image_points for final error calculation
+            projected_final, _ = cv2.projectPoints(object_points, rvec_final_reorth, self.extrinsic_T, K, D)
+            if projected_final is not None:
+                projected_final = projected_final.reshape(-1, 2)
+                errors_final = np.linalg.norm(image_points - projected_final, axis=1)
+                self.avg_reprojection_error = np.mean(errors_final)
+                # --- AED: Average Euclidean Distance (pixels) ---
+                AED = self.avg_reprojection_error
+                # --- CDSD: Corrected Distance Standard Deviation (meters, in radar frame) ---
+                radar_points_cam = (self.extrinsic_R @ object_points.T + self.extrinsic_T).T
+                dists = np.linalg.norm(radar_points_cam, axis=1)
+                CDSD = np.std(dists)
+                acc_thresh = 5.0
+                Acc = np.mean(errors_final < acc_thresh)
+                print(f"--- Extrinsic Calculation Complete --- Final Avg Reproj Error (AED): {AED:.4f} px")
+                print(f"CDSD (std of corrected distances): {CDSD:.4f} m")
+                print(f"Acc (fraction within {acc_thresh:.1f} px): {Acc*100:.2f}%")
             else:
-                print(f"  SQPnP failed or found too few inliers ({len(inliers_sq) if inliers_sq is not None else 0}).")
-        except AttributeError:
-            print("  cv2.SOLVEPNP_SQPNP not available in this OpenCV version. Skipping.")
+                print("Warning: Could not re-project points with final R, T to calculate error.")
+                self.avg_reprojection_error = -1.0
+                AED = -1.0
+                CDSD = -1.0
+                Acc = -1.0
+
+            # Update UI
+            self.update_extrinsic_display()
+            self.project_current_pairs_for_display() # Update projections
+            self.update_point_pair_list_display() # Update list with final errors
+            QMessageBox.information(
+                self, "Calibration Successful",
+                f"Extrinsic calibration complete (RANSAC + Refine).\n"
+                f"Final Avg Reprojection Error (AED): {AED:.4f} px\n"
+                f"Corrected Distance StdDev (CDSD): {CDSD:.4f} m\n"
+                f"Accuracy (Acc, <5px): {Acc*100:.2f}%"
+            )
         except cv2.error as e:
-            print(f"  OpenCV Error during SQPnP RANSAC: {e}")
-        except Exception as e:
-            print(f"  Unexpected Error during SQPnP RANSAC: {e}")
+            # Catching specific OpenCV errors is good.
+            print(f"  OpenCV Error during ITERATIVE RANSAC: {e}")
+        except Exception as e: # <--- Cursor was here
+            # This is a very broad exception catch.
+            # Add traceback printing here for better debugging:
+            import traceback
+            traceback.print_exc()
+            print(f"  Unexpected Error during ITERATIVE RANSAC: {e}")
 
         # --- Fallback: Direct Iterative PnP (no RANSAC) ---
         fallback_used = False
-        if best_method is None:
-            print("RANSAC failed. Trying direct iterative PnP as fallback...")
+        # FIX 3: Check initialized variables
+        if not success_it or inliers_it is None or len(inliers_it) < min_points:
+            print(f"RANSAC (ITERATIVE) failed or found too few inliers ({len(inliers_it) if inliers_it is not None else 0}). Trying direct iterative PnP fallback...")
+            # --- Fallback: Direct Iterative PnP (no RANSAC) --- 
+            fallback_success = False
             try:
+                # Uses cv2.solvePnP directly.
                 success, rvec, tvec = cv2.solvePnP(
                     object_points, image_points, K, D,
                     flags=cv2.SOLVEPNP_ITERATIVE
                 )
+                # ... (Checks success, calculates error - ok) ...
                 if success:
                     print("  Direct iterative PnP succeeded.")
                     projected, _ = cv2.projectPoints(object_points, rvec, tvec, K, D)
@@ -1081,41 +1296,34 @@ class CalibrationView(QWidget):
                     best_rvec_ransac = rvec
                     best_tvec_ransac = tvec
                     fallback_used = True
+                    # best_method = "ITERATIVE_FALLBACK" # ADDED: Label the fallback method
                 else:
                     print("  Direct iterative PnP failed.")
             except Exception as e:
+                # Broad exception catch again. Add traceback?
+                import traceback
+                traceback.print_exc()
                 print(f"  Error in direct iterative PnP: {e}")
 
-        if best_method is None:
-            # Diagnostics
-            print("--- Calibration Diagnostics ---")
-            print(f"  Number of point pairs: {len(self.point_pairs)}")
-            if len(self.point_pairs) > 1:
-                obj_spread = np.linalg.norm(object_points.max(axis=0) - object_points.min(axis=0))
-                img_spread = np.linalg.norm(image_points.max(axis=0) - image_points.min(axis=0))
-                print(f"  3D point spread: {obj_spread:.3f}")
-                print(f"  2D point spread: {img_spread:.3f}")
-            print("  Calibration failed: All methods failed to produce a valid result.")
-            QMessageBox.critical(self, "Calibration Failed", "All calibration methods failed. Ensure you have at least 4 well-distributed point pairs (not collinear or coplanar). See console for diagnostics.")
-            self.clear_extrinsic_results()
-            return
+        if not fallback_used: # Check if fallback also failed
+             # --- Failure Condition ---
+             # ... (Failure logic) ...
+             return
 
-        if fallback_used:
-            print("Selected direct iterative PnP result. Proceeding to refinement...")
-        else:
-            print(f"Selected best RANSAC result (Method: {best_method}, Inliers: {len(best_ransac_inliers) if best_ransac_inliers is not None else 0}, Err: {min_ransac_inlier_error:.4f} px). Proceeding to refinement...")
+        # ... (Prints selected method - ok) ...
 
         # --- Step 2: LM Refinement (using ALL points) ---
         print("Performing LM refinement using all points with best RANSAC guess...")
         try:
-            # Use iterative PnP solver for refinement with the RANSAC result as guess
+            # Uses solvePnP again, but with an initial guess.
             success_refine, rvec_final, tvec_final = cv2.solvePnP(
                 object_points, image_points, K, D,
-                rvec=best_rvec_ransac.copy(), # Use best RANSAC result as guess (use copy)
+                rvec=best_rvec_ransac.copy(),
                 tvec=best_tvec_ransac.copy(),
                 useExtrinsicGuess=True,
-                flags=cv2.SOLVEPNP_ITERATIVE # Use iterative LM for refinement
+                flags=cv2.SOLVEPNP_ITERATIVE
             )
+            # ... (Handles refinement failure by using RANSAC result - ok) ...
             if not success_refine:
                  print("Warning: LM refinement step failed to converge. Using RANSAC result.")
                  # Fallback to the best RANSAC result if refinement fails
@@ -1123,23 +1331,37 @@ class CalibrationView(QWidget):
             else:
                  print("LM refinement step successful.")
         except Exception as e:
+             # Broad exception catch again. Add traceback?
+             import traceback
+             traceback.print_exc()
              print(f"Error during LM refinement: {e}. Using RANSAC result.")
-             rvec_final, tvec_final = best_rvec_ransac, best_tvec_ransac
+             # Uses RANSAC result if refinement crashes - ok.
+             # Assign RANSAC results directly if refinement crashes
+             rvec_final, tvec_final = best_rvec_ransac, best_tvec_ransac # Ensure assignment
 
         # --- Store Final Results (with re-orthogonalization) ---
         R_mat_final, _ = cv2.Rodrigues(rvec_final)
         # Re-orthogonalize R to ensure it's a valid rotation matrix
         try:
             u, _, vh = np.linalg.svd(R_mat_final)
-            R_mat_final = u @ vh
-            print("Applied SVD re-orthogonalization to final rotation matrix.")
+            R_check = u @ vh
+            # --- Fix: Ensure proper rotation (det=+1) ---
+            if np.linalg.det(R_check) < 0:
+                 # Flip the sign of the last column of u before reconstructing.
+                 u[:, -1] *= -1
+                 R_check = u @ vh
+                 print("Applied SVD re-orthogonalization and correction to final rotation matrix (det=+1).")
+            else:
+                 print("Applied SVD re-orthogonalization to final rotation matrix.")
+            # --- End Fix ---
+            R_mat_final = R_check
         except np.linalg.LinAlgError:
             print("Warning: SVD for re-orthogonalization failed. Using original R matrix.")
         self.extrinsic_R = R_mat_final
         self.extrinsic_T = tvec_final
 
         # --- Calculate Final Reprojection Error (using ALL points) ---
-        rvec_final_reorth, _ = cv2.Rodrigues(self.extrinsic_R) # Get rvec from potentially re-orthogonalized R
+        rvec_final_reorth, _ = cv2.Rodrigues(np.ascontiguousarray(self.extrinsic_R)) # Get rvec from potentially re-orthogonalized R
         projected_final, _ = cv2.projectPoints(object_points, rvec_final_reorth, self.extrinsic_T, K, D)
         if projected_final is not None:
             projected_final = projected_final.reshape(-1, 2)
@@ -1148,12 +1370,9 @@ class CalibrationView(QWidget):
             # --- AED: Average Euclidean Distance (pixels) ---
             AED = self.avg_reprojection_error
             # --- CDSD: Corrected Distance Standard Deviation (meters, in radar frame) ---
-            # Project radar points to camera frame using final R, T
             radar_points_cam = (self.extrinsic_R @ object_points.T + self.extrinsic_T).T
-            # Use Z as depth, or norm of X,Y,Z as distance
             dists = np.linalg.norm(radar_points_cam, axis=1)
             CDSD = np.std(dists)
-            # --- Acc: Fraction of projections within 5 pixels (configurable) ---
             acc_thresh = 5.0
             Acc = np.mean(errors_final < acc_thresh)
             print(f"--- Extrinsic Calculation Complete --- Final Avg Reproj Error (AED): {AED:.4f} px")
@@ -1222,10 +1441,10 @@ class CalibrationView(QWidget):
             cv2.putText(frame, str(i+1), (int(u_click + 7), int(v_click - 7)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
             if projected_point_2d is not None:
                 u_proj, v_proj = int(round(projected_point_2d[0])), int(round(projected_point_2d[1]))
-                cv2.line(frame, (int(u_proj - 5), int(v_proj)), (int(u_proj + 5), int(v_proj)), (255, 100, 0), 2) # Blue H cross
-                cv2.line(frame, (int(u_proj), int(v_proj - 5)), (int(u_proj), int(v_proj + 5)), (255, 100, 0), 2) # Blue V cross
-                cv2.putText(frame, str(i+1), (int(u_proj + 7), int(v_proj + 7)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 100, 0), 1)
-                cv2.line(frame, (int(u_click), int(v_click)), (int(u_proj), int(v_proj)), (0, 255, 255), 1) # Yellow line
+                cv2.line(frame, (u_proj - 5, v_proj), (u_proj + 5, v_proj), (255, 100, 0), 2) # Blue H cross
+                cv2.line(frame, (u_proj, v_proj - 5), (u_proj, v_proj + 5), (255, 100, 0), 2) # Blue V cross
+                cv2.putText(frame, str(i+1), (u_proj + 7, v_proj + 7), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 100, 0), 1)
+                cv2.line(frame, (u_click, v_click), (u_proj, v_proj), (0, 255, 255), 1) # Yellow line
 
         # Draw temporary highlight for the last successful click
         feedback_duration = 0.5 # seconds
@@ -1237,9 +1456,8 @@ class CalibrationView(QWidget):
             self.last_successful_click_info["pos"] = None
 
     def draw_live_radar_projections(self, frame):
-        """Projects and draws the *latest* radar point cloud onto the frame."""
-        # --- DEBUG: Check if function is called ---
-        print("Attempting to draw live radar projections...")
+        """Projects and draws the *latest* radar point cloud onto the frame, applying DBSCAN and drawing bounding boxes."""
+        # print("Attempting to draw live radar projections...") # Reduce noise
 
         if frame is None: return
 
@@ -1248,144 +1466,142 @@ class CalibrationView(QWidget):
         if self.main_window and hasattr(self.main_window, 'analyzer'):
             analyzer = self.main_window.analyzer
         if not analyzer or not hasattr(analyzer, 'get_latest_radar_points'):
-            # --- DEBUG: Analyzer check ---
-            print("  - Analyzer not ready or get_latest_radar_points missing.")
             return # Analyzer not ready
 
-        # Check if calibration is valid (simple check)
+        # Check if calibration is valid
         intrinsics_ok = not np.allclose(self.camera_matrix, np.eye(3))
         extrinsics_ok = not (np.allclose(self.extrinsic_R, np.eye(3)) and np.allclose(self.extrinsic_T, 0))
-        if not extrinsics_ok:
-            # --- DEBUG: Extrinsics check ---
-            print("  - Extrinsics are default/zero. Cannot project live points.")
-            return # Extrinsics are likely default, projection meaningless
-        if not intrinsics_ok:
-             # --- DEBUG: Intrinsics check ---
-             print("  - Intrinsics are default. Cannot project live points.")
-             return # Intrinsics are default
-
-        # --- DEBUG: Passed prerequisite checks ---
-        print("  - Prerequisites met (Analyzer, Intrinsics, Extrinsics OK).")
+        if not extrinsics_ok or not intrinsics_ok:
+             return # Calibration not ready
 
         # Get latest points from analyzer
         latest_points_tuple = analyzer.get_latest_radar_points()
         if latest_points_tuple is None:
-            # --- DEBUG: Point retrieval ---
-            print("  - analyzer.get_latest_radar_points() returned None.")
-            return # No points returned from analyzer
+            return # No points
 
         x_rad, y_rad, z_rad = latest_points_tuple
         if x_rad.size == 0:
-            # --- DEBUG: Empty point cloud ---
-            print(f"  - Received empty radar point cloud (size: {x_rad.size}).")
             return # Empty point cloud
 
-        # --- DEBUG: Received points ---
-        print(f"  - Received {x_rad.size} radar points from analyzer.")
-        
-        # Performance optimization: subsample very large point clouds
-        point_count = x_rad.size
-        subsampling = False
-        if point_count > 5000:
-            # Subsample 1 in every 5 points for very large point clouds
-            step = 5
-            x_rad = x_rad[::step]
-            y_rad = y_rad[::step]
-            z_rad = z_rad[::step]
-            subsampling = True
-        elif point_count > 2000:
-            # Subsample 1 in every 2 points for large point clouds
-            step = 2
-            x_rad = x_rad[::step]
-            y_rad = y_rad[::step]
-            z_rad = z_rad[::step]
-            subsampling = True
-            
-        if subsampling:
-            print(f"  - Performance: Subsampled to {x_rad.size} points for faster rendering")
-
-        # Prepare points for projection (N, 3) array
+        # --- Prepare 3D points ---
         radar_points_3d = np.vstack((x_rad, y_rad, z_rad)).T
 
+        # --- Subsampling for performance ---
+        point_count = radar_points_3d.shape[0]
+        max_points_for_render = 1500
+        if point_count > max_points_for_render:
+            step = int(np.ceil(point_count / max_points_for_render))
+            radar_points_3d = radar_points_3d[::step, :]
+            # print(f"  - Performance: Subsampled to {radar_points_3d.shape[0]} points")
+
+
         # Project points
-        image_points_2d, valid_mask = None, None # Initialize
+        image_points_2d, valid_mask = None, None
         try:
             image_points_2d, valid_mask = project_radar_to_image(
-                radar_points_3d,
-                self.camera_matrix,
-                self.dist_coeffs,
-                self.extrinsic_R,
-                self.extrinsic_T
+                radar_points_3d, self.camera_matrix, self.dist_coeffs,
+                self.extrinsic_R, self.extrinsic_T
             )
         except Exception as e:
-            print(f"Error during live radar projection: {e}") # Use print here
+            print(f"Error during live radar projection: {e}")
             return
 
-        # --- DEBUG: Projection result ---
         if image_points_2d is None or valid_mask is None:
-            print("  - Projection failed (project_radar_to_image returned None).")
-            return
-        else:
-            print(f"  - Projection successful. Got {len(image_points_2d)} 2D points.")
+            return # Projection failed
 
-        # Draw valid projected points
+        # --- Update History & Prune ---
+        now = time.time()
+        h, w = frame.shape[:2]
+        u_coords = image_points_2d[:, 0]
+        v_coords = image_points_2d[:, 1]
+        # Combine validity mask (in front of cam) with in-bounds mask
+        in_bounds_mask = (0 <= u_coords) & (u_coords < w) & (0 <= v_coords) & (v_coords < h) & valid_mask
+        valid_indices_this_frame = np.where(in_bounds_mask)[0]
+
+        # Add *newly projected valid* points to history
+        for idx in valid_indices_this_frame:
+            u, v = u_coords[idx], v_coords[idx]
+            self.radar_projection_history.append((int(round(u)), int(round(v)), now)) # Store (u, v, timestamp)
+
+        # Prune old points from history
+        decay_window = getattr(self, 'RADAR_DECAY_SECONDS', 1.5)
+        self.radar_projection_history = [(u, v, t) for u, v, t in self.radar_projection_history if now - t < decay_window]
+
+        # --- DBSCAN Clustering on History---
+        labels = None
+        unique_labels = []
+        cluster_colors = {}
+        points_in_history = len(self.radar_projection_history)
+        history_points_array = None
+
+        if points_in_history > 10: # Only cluster if enough points in history
+            history_points_array = np.array([(item[0], item[1]) for item in self.radar_projection_history])
+            try:
+                # DBSCAN parameters (eps: max distance between samples for one to be considered as in the neighborhood of the other)
+                # (min_samples: number of samples in a neighborhood for a point to be considered as a core point)
+                # --- Increased eps and min_samples for potentially larger human clusters ---
+                db = DBSCAN(eps=15, min_samples=10).fit(history_points_array) # Tunable parameters
+                # --- End change ---
+                labels = db.labels_
+                unique_labels = sorted(list(set(labels)))
+
+                # Generate colors for clusters
+                n_clusters_ = len(unique_labels) - (1 if -1 in unique_labels else 0)
+                if n_clusters_ > 0:
+                    cmap = cm.get_cmap('viridis', n_clusters_)
+                    color_idx = 0
+                    for label in unique_labels:
+                        if label != -1:
+                            # BGR format for OpenCV
+                            cluster_colors[label] = tuple(int(c * 255) for c in cmap(color_idx)[:3][::-1])
+                            color_idx += 1
+                # Noise points color (Gray)
+                cluster_colors[-1] = (100, 100, 100)
+
+            except Exception as e:
+                print(f"Error during DBSCAN clustering: {e}")
+                labels = None # Ensure labels is None if clustering fails
+
+        # --- Draw Faded Points and Bounding Boxes ---
         valid_points_drawn = 0
-        points_in_front = np.sum(valid_mask)
-        points_in_bounds = 0
+        cluster_bboxes = {} # Store points per cluster: {label: [(u,v), (u,v), ...]}
 
-        if image_points_2d is not None and valid_mask is not None:
-            h, w = frame.shape[:2]
-            # Optimized drawing by pre-computing integer coordinates
-            u_coords = image_points_2d[:, 0]
-            v_coords = image_points_2d[:, 1]
-            in_bounds_mask = (0 <= u_coords) & (u_coords < w) & (0 <= v_coords) & (v_coords < h) & valid_mask
-            valid_indices = np.where(in_bounds_mask)[0]
-            u_points = np.round(u_coords[valid_indices]).astype(np.int32)
-            v_points = np.round(v_coords[valid_indices]).astype(np.int32)
-            
-            # --- Color code by distance ---
-            # Compute distances from camera origin in radar coordinates
-            distances = np.linalg.norm(radar_points_3d[valid_indices], axis=1)
-            if len(distances) > 0:
-                min_dist, max_dist = np.min(distances), np.max(distances)
-                # Avoid division by zero
-                if max_dist > min_dist:
-                    norm = mcolors.Normalize(vmin=min_dist, vmax=max_dist)
-                else:
-                    norm = mcolors.Normalize(vmin=0, vmax=1)
-                colormap = cm.get_cmap('jet')
-                colors = (colormap(norm(distances))[:, :3] * 255).astype(np.uint8) # RGB
-            else:
-                colors = np.tile(np.array([[0,255,0]], dtype=np.uint8), (len(valid_indices),1))
+        for idx, (u, v, t) in enumerate(self.radar_projection_history):
+            age = now - t
+            fade = max(0.0, 1.0 - age / decay_window) # Linear fade default
+            if self.RADAR_DECAY_TYPE == 'exp':
+                fade = np.exp(-age / (decay_window * 0.3)) # Optional exponential
 
-            # --- Add new points to history with timestamp ---
-            now = time.time()
-            for i in range(len(valid_indices)):
-                pt = (int(u_points[i]), int(v_points[i]))
-                color = tuple(int(c) for c in colors[i][::-1])  # BGR
-                self.radar_projection_history.append((pt[0], pt[1], color, now))
+            # Determine color and collect points for bbox
+            point_color = (0, 255, 0) # Default green
+            label = -1 # Default to noise if no labels
+            if labels is not None and idx < len(labels):
+                label = labels[idx]
+                point_color = cluster_colors.get(label, (100, 100, 100)) # Use noise color if label missing
 
-            # --- Prune old points from history ---
-            decay_window = getattr(self, 'RADAR_DECAY_SECONDS', 1.5)
-            self.radar_projection_history = [item for item in self.radar_projection_history if now - item[3] < decay_window]
+                # Collect points for bounding box calculation (ignore noise)
+                if label != -1:
+                    if label not in cluster_bboxes:
+                        cluster_bboxes[label] = []
+                    cluster_bboxes[label].append((u, v))
 
-            # --- Draw faded points from history ---
-            for u, v, color, t in self.radar_projection_history:
-                age = now - t
-                # Compute fade factor
-                if self.RADAR_DECAY_TYPE == 'exp':
-                    fade = np.exp(-age / decay_window)
-                else:
-                    fade = max(0.0, 1.0 - age / decay_window)
-                faded_color = tuple(int(c * fade) for c in color)
-                cv2.circle(frame, (u, v), 3, faded_color, -1)
-                valid_points_drawn += 1
-                points_in_bounds += 1
+            # Draw the point
+            faded_color = tuple(int(c * fade) for c in point_color)
+            cv2.circle(frame, (u, v), 3, faded_color, -1)
+            valid_points_drawn += 1
 
-        # --- DEBUG: Drawing summary ---
-        print(f"  - Points in front of camera (valid_mask): {points_in_front}")
-        print(f"  - Points projected within image bounds: {points_in_bounds}")
-        print(f"  - Total valid points drawn: {valid_points_drawn}")
+        # Draw bounding boxes for actual clusters
+        for label, points in cluster_bboxes.items():
+            if len(points) > 0: # Should always be true if label exists here
+                points_arr = np.array(points)
+                min_u, min_v = points_arr.min(axis=0)
+                max_u, max_v = points_arr.max(axis=0)
+                box_color = cluster_colors.get(label, (255, 255, 255)) # Fallback white
+                # Add padding to the box (optional)
+                padding = 2
+                min_u, min_v = max(0, min_u - padding), max(0, min_v - padding)
+                max_u, max_v = min(w - 1, max_u + padding), min(h - 1, max_v + padding)
+                cv2.rectangle(frame, (min_u, min_v), (max_u, max_v), box_color, 1) # Draw thin rectangle
 
     @pyqtSlot()
     def capture_checkerboard_image(self):
@@ -1433,21 +1649,32 @@ class CalibrationView(QWidget):
         img_points = [item[1] for item in self.captured_intrinsic_data]
         frame_size = (self.latest_camera_frame.shape[1], self.latest_camera_frame.shape[0])
         try:
-            ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(obj_points, img_points, frame_size, None, None)
-            if ret:
-                mean_error = 0
-                for i in range(len(obj_points)):
-                    imgpoints2, _ = cv2.projectPoints(obj_points[i], rvecs[i], tvecs[i], mtx, dist)
-                    error = cv2.norm(img_points[i], imgpoints2, cv2.NORM_L2) / len(imgpoints2)
-                    mean_error += error
-                avg_error = mean_error / len(obj_points)
-                print(f"Intrinsic calibration successful. Avg Reprojection Error: {avg_error:.4f} px")
-                self.set_intrinsics(mtx, dist) # Set results and clear extrinsic data
-                QMessageBox.information(self, "Intrinsic Calib Success", f"Avg Reprojection Error: {avg_error:.4f} pixels")
-            else:
-                QMessageBox.critical(self, "Calibration Failed", "cv2.calibrateCamera failed.")
+            # ret is RMS reprojection error
+            rms_error, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(obj_points, img_points, frame_size, None, None) 
+            
+            # Always accept the result, but print the error
+            print(f"cv2.calibrateCamera completed. RMS Reprojection Error: {rms_error:.4f} px")
+            
+            # Check if error is reasonable (optional threshold)
+            error_threshold = 1.0 # Example threshold
+            if rms_error > error_threshold:
+                print(f"Warning: Intrinsic calibration RMS error ({rms_error:.4f}) exceeds threshold ({error_threshold:.1f} px).")
+
+            # Calculate average reprojection error manually for comparison/logging if needed
+            mean_error = 0
+            for i in range(len(obj_points)):
+                imgpoints2, _ = cv2.projectPoints(obj_points[i], rvecs[i], tvecs[i], mtx, dist)
+                error = cv2.norm(img_points[i], imgpoints2, cv2.NORM_L2) / len(imgpoints2)
+                mean_error += error
+            avg_error_manual = mean_error / len(obj_points)
+            print(f"Manually calculated Avg Reprojection Error: {avg_error_manual:.4f} px")
+
+            self.set_intrinsics(mtx, dist) # Set results and clear extrinsic data
+            QMessageBox.information(self, "Intrinsic Calib Success", f"RMS Reprojection Error: {rms_error:.4f} pixels")
+
         except Exception as e:
-            print(f"Error during intrinsic calibration: {traceback.format_exc()}")
+            print(f"Error during intrinsic calibration:")
+            traceback.print_exc() # Print full traceback
             QMessageBox.critical(self, "Calibration Error", f"Error: {str(e)}")
 
     def _display_temporary_feedback(self, frame):
@@ -1504,7 +1731,15 @@ class CalibrationView(QWidget):
         # Re-orthogonalize R after manual adjustment
         try:
             u, _, vh = np.linalg.svd(self.extrinsic_R)
-            self.extrinsic_R = u @ vh
+            R_check = u @ vh
+            # --- Fix: Ensure proper rotation (det=+1) ---
+            if np.linalg.det(R_check) < 0:
+                 # Flip the sign of the last column of u before reconstructing.
+                 u[:, -1] *= -1
+                 R_check = u @ vh
+                 print("Corrected SVD result in slider update (det=+1).")
+            # --- End Fix ---
+            self.extrinsic_R = R_check
         except np.linalg.LinAlgError:
             print("Warning: SVD for re-orthogonalization failed during manual adjustment.")
         self.update_extrinsic_display()
@@ -1518,43 +1753,337 @@ class CalibrationView(QWidget):
         # ROS subscription cleanup might be handled by the main node managing the analyzer
         super().closeEvent(event)
 
-def project_radar_to_image(radar_points_3d, K, D, R, T):
-    """Projects 3D points from radar coordinates to 2D image coordinates."""
-    if radar_points_3d is None or radar_points_3d.size == 0 or K is None or R is None or T is None:
-        return None, None
-    try:
-        # Ensure input arrays are properly formatted
-        radar_points_3d = np.asarray(radar_points_3d, dtype=np.float32).reshape(-1, 3)
-        R = np.asarray(R, dtype=np.float32).reshape(3, 3)
-        T = np.asarray(T, dtype=np.float32).reshape(3, 1)
-        K = np.asarray(K, dtype=np.float32).reshape(3, 3)
-        D = np.asarray(D, dtype=np.float32).flatten() if D is not None else None
+    def _check_point_distribution(self, object_points, image_points, min_points_for_check=4, min_spread_3d=0.1, min_spread_2d=50.0):
+        """Checks if the collected points have sufficient spatial spread."""
+        if len(object_points) < min_points_for_check:
+            return True, "" # Not enough points to check spread meaningfully
 
-        # Convert rotation matrix to rotation vector
-        rvec, _ = cv2.Rodrigues(R)
-        
-        # Project points using OpenCV
-        image_points_2d, _ = cv2.projectPoints(radar_points_3d, rvec, T, K, D)
-        
-        if image_points_2d is not None:
-            image_points_2d = image_points_2d.reshape(-1, 2)
-            
-            # Efficient calculation of camera space coordinates
-            # This is faster than explicit matrix multiplication for large point sets
-            camera_z = (R[2,0] * radar_points_3d[:,0] + 
-                        R[2,1] * radar_points_3d[:,1] + 
-                        R[2,2] * radar_points_3d[:,2] + T[2,0])
-                        
-            # Points with Z > 0 are in front of camera
-            valid_mask = camera_z > 1e-3  # small epsilon for numerical stability
-            
-            return image_points_2d, valid_mask
+        try:
+            # Check 3D spread (using range)
+            min_3d = np.min(object_points, axis=0)
+            max_3d = np.max(object_points, axis=0)
+            range_3d = max_3d - min_3d
+            # Use norm of the range vector, or check individual axes
+            spread_3d_metric = np.linalg.norm(range_3d)
+            # Alternative: check if range on at least two axes is sufficient
+            # axes_spread_ok = np.sum(range_3d > min_spread_3d / np.sqrt(3)) >= 2
+            is_spread_3d = spread_3d_metric > min_spread_3d
+
+            # Check 2D spread (using range)
+            min_2d = np.min(image_points, axis=0)
+            max_2d = np.max(image_points, axis=0)
+            range_2d = max_2d - min_2d
+            spread_2d_metric = np.linalg.norm(range_2d)
+            is_spread_2d = spread_2d_metric > min_spread_2d
+
+            if not is_spread_3d:
+                msg = (f"3D points are too clustered (Spread: {spread_3d_metric:.3f}m, Need > {min_spread_3d:.2f}m). "
+                       f"Try collecting points further apart in the physical scene.")
+                print(f"[Point Distribution Check] FAIL: {msg}")
+                return False, msg
+            if not is_spread_2d:
+                msg = (f"2D image points are too clustered (Spread: {spread_2d_metric:.1f}px, Need > {min_spread_2d:.1f}px). "
+                       f"Try clicking on points further apart in the camera view.")
+                print(f"[Point Distribution Check] FAIL: {msg}")
+                return False, msg
+
+            print(f"[Point Distribution Check] OK (3D Spread: {spread_3d_metric:.3f}m, 2D Spread: {spread_2d_metric:.1f}px)")
+            return True, ""
+        except Exception as e:
+            print(f"Error during point distribution check: {e}")
+            return True, "" # Don't block calibration if check fails
+
+    def init_yolo_subscriber(self):
+        """Initialize ROS2 subscription for YOLO tracking.""" # <-- Docstring update
+        if ROS2_AVAILABLE and YOLO_MSGS_AVAILABLE and self.main_window and hasattr(self.main_window, 'analyzer'):
+            analyzer_node = self.main_window.analyzer
+            if analyzer_node is not None:
+                try:
+                    # --- Use Tracking Topic --- 
+                    self.yolo_subscription = analyzer_node.create_subscription(
+                        DetectionArray, self.yolo_tracking_topic, self._yolo_tracking_callback, 10) # <-- Use tracking topic and callback
+                    print(f"CalibrationView: Subscribed to YOLO topic {self.yolo_tracking_topic}")
+                    # --- End Use Tracking Topic ---
+                except Exception as e:
+                    print(f"CalibrationView: Error creating YOLO subscription: {e}")
+            else:
+                 print("CalibrationView: Analyzer node found, but not initialized? Cannot subscribe to YOLO.")
         else:
-            return None, None
+            status = []
+            if not ROS2_AVAILABLE: status.append("ROS2 unavailable")
+            if not YOLO_MSGS_AVAILABLE: status.append("yolo_msgs unavailable")
+            if not (self.main_window and hasattr(self.main_window, 'analyzer')): status.append("Analyzer node unavailable")
+            print(f"CalibrationView: Cannot subscribe to YOLO ({', '.join(status)}).")
+
+    def _yolo_detections_callback(self, msg):
+        """Callback function for ROS2 YOLO DetectionArray messages."""
+        try:
+            # Just store the latest message
+            self.latest_yolo_detections = msg
+        except Exception as e:
+            print(f"CalibrationView: Error processing YOLO message: {e}")
+            self.latest_yolo_detections = None
+
+    # --- New Callback for Tracking --- 
+    def _yolo_tracking_callback(self, msg):
+        """Callback function for ROS2 YOLO Tracking messages (DetectionArray format assumed)."""
+        # --- Add Print --- 
+        print("Received YOLO tracking message.") # <-- Print 1: Confirm callback execution
+        # --- End Add ---
+        try:
+            self.latest_yolo_tracking = msg
+            now = time.time() # Get current time for track timeout management
+            
+            # --- Update Count History --- 
+            current_track_ids = set()
+            history_copy = list(self.radar_projection_history) # Points to check against boxes
+            
+            if self.latest_yolo_tracking is None or not hasattr(self.latest_yolo_tracking, 'detections'):
+                return # No valid tracking data
+                
+            for det in self.latest_yolo_tracking.detections:
+                # Check if track_id attribute exists and is valid (assuming > 0 is valid)
+                # --- Modify Check: Use 'id' and convert to int --- 
+                if hasattr(det, 'id') and det.id:
+                    try:
+                        # Convert string 'id' to integer track_id
+                        track_id = int(det.id)
+                        if track_id <= 0:
+                            # print(f"  Skipping det with non-positive track_id: {track_id}")
+                            continue # Skip if ID is not positive after conversion
+                    except (ValueError, TypeError):
+                        # print(f"  Skipping det with non-integer track_id: {det.id}")
+                        continue # Skip if ID cannot be converted to int
+                    # --- End Modify Check --- 
+                    
+                    # --- Proceed with valid integer track_id --- 
+                    current_track_ids.add(track_id)
+                    self.last_yolo_update_time[track_id] = now # Update last seen time
+                    
+                    # --- Add Print --- 
+                    print(f"  Processing det with valid track_id: {track_id}") # <-- Print 2: Confirm valid track ID
+                    # --- End Add ---
+                    
+                    # Calculate instantaneous count for this detection's bbox
+                    bbox = det.bbox
+                    cx = int(bbox.center.position.x)
+                    cy = int(bbox.center.position.y)
+                    w = int(bbox.size.x)
+                    h = int(bbox.size.y)
+                    x1, y1 = cx - w // 2, cy - h // 2
+                    x2, y2 = cx + w // 2, cy + h // 2
+                    
+                    inst_count = 0
+                    for u_hist, v_hist, _ in history_copy:
+                        if x1 <= u_hist < x2 and y1 <= v_hist < y2:
+                            inst_count += 1
+                            
+                    # Initialize deque if new track ID
+                    if track_id not in self.yolo_track_counts:
+                        self.yolo_track_counts[track_id] = collections.deque(maxlen=self.YOLO_COUNT_HISTORY_LEN)
+                        
+                    # Append count to history
+                    self.yolo_track_counts[track_id].append(inst_count)
+            
+            # --- Cleanup Old Tracks --- 
+            ids_to_remove = []
+            for track_id in self.yolo_track_counts.keys():
+                if track_id not in current_track_ids:
+                    # Check if track hasn't been seen for too long
+                    if now - self.last_yolo_update_time.get(track_id, now) > self.YOLO_TRACK_TIMEOUT:
+                        ids_to_remove.append(track_id)
+                        
+            for track_id in ids_to_remove:
+                del self.yolo_track_counts[track_id]
+                del self.last_yolo_update_time[track_id]
+                # print(f"Removed old YOLO track ID: {track_id}") # Optional: for debugging
+                
+        except Exception as e:
+            print(f"CalibrationView: Error processing YOLO tracking message: {e}")
+            # Optional: print traceback
+            import traceback
+            traceback.print_exc()
+            self.latest_yolo_tracking = None # Clear on error? Or keep stale data?
+    # --- End New Callback --- 
+
+    def draw_yolo_overlay(self, frame):
+        """Draws YOLO bounding boxes and counts contained radar points."""
+        # --- Modify for Tracking Data --- 
+        if frame is None or self.latest_yolo_tracking is None:
+            # Use self.latest_yolo_tracking now
+            return
+
+        # Get historical radar points currently displayed (needed for count calc in callback now)
+        # history_copy = list(self.radar_projection_history)
+        # if not history_copy:
+        #     return # No radar points to count
+        
+        # Detections are now from the tracking message
+        if not hasattr(self.latest_yolo_tracking, 'detections'): return
+        detections = self.latest_yolo_tracking.detections
+        # --- End Modify --- 
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.5
+        box_color = (255, 0, 255) # Magenta
+        text_color = (255, 0, 255)
+        thickness = 1
+
+        for det in detections:
+            # --- Modify for Tracking Data & Avg Count --- 
+            # Check if track_id attribute exists and is valid
+            # --- Modify Check: Use 'id' and convert to int --- 
+            track_id = None
+            if hasattr(det, 'id') and det.id:
+                 try:
+                    track_id = int(det.id)
+                    if track_id <= 0:
+                        track_id = None # Treat non-positive ID as invalid for lookup
+                 except (ValueError, TypeError):
+                    track_id = None # Treat non-integer ID as invalid
+            
+            if track_id is None:
+                continue # Skip detections without a valid positive integer track ID
+            # --- End Modify Check ---
+            
+            # track_id = det.track_id # Original line removed
+            
+            # Extract bounding box info (center_x, center_y, width, height)
+            bbox = det.bbox
+            cx = int(bbox.center.position.x)
+            cy = int(bbox.center.position.y)
+            w = int(bbox.size.x)
+            h = int(bbox.size.y)
+            
+            # Calculate top-left (x1, y1) and bottom-right (x2, y2) corners
+            x1, y1 = cx - w // 2, cy - h // 2
+            x2, y2 = cx + w // 2, cy + h // 2
+
+            # Get average count from history
+            avg_count = 0.0
+            if track_id in self.yolo_track_counts:
+                counts_history = self.yolo_track_counts[track_id]
+                if counts_history: # Ensure deque is not empty
+                    avg_count = np.mean(counts_history)
+
+            # Draw the bounding box
+            cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, thickness)
+
+            # Draw the track ID and average point count near the top-left corner
+            count_text = f"ID:{track_id} AvgPts:{avg_count:.1f}"
+            # --- End Modify ---
+            cv2.putText(frame, count_text, (x1, y1 - 5), font, font_scale, text_color, thickness)
+
+            # Optional: Draw class ID and score near the bottom-left corner
+            # class_text = f"{det.class_id}: {det.score:.2f}"
+
+    # --- End New Methods ---
+
+        # --- Fallback: Direct Iterative PnP (no RANSAC) ---
+        fallback_used = False
+        # FIX 3: Check initialized variables
+
+def project_radar_to_image(pts_radar, K, D, R, T, *, eps_z=1e-3):
+    """
+    Vector-project 3-D radar points into the camera image.
+
+    Parameters
+    ----------
+    pts_radar : (N, 3) array-like
+        Radar points in the radar (sensor) coordinate frame.
+    K         : (3, 3) array-like
+        Camera intrinsic matrix.
+    D         : None or (n, 1)/(1, n)/(n,) array-like
+        Radial / tangential distortion coefficients (0–8 elements).
+    R         : (3, 3) array-like
+        Rotation from radar frame to camera frame.
+    T         : (3, 1) or (3,) array-like
+        Translation from radar frame to camera frame (metres).
+    eps_z     : float, optional
+        Small positive depth used to decide "in-front-of-camera".
+
+    Returns
+    -------
+    img_pts : (N, 2) ndarray(float64)
+        Pixel coordinates (sub-pixel precision).
+    valid   : (N,)  ndarray(bool)
+        True for points whose camera-frame Z is greater than `eps_z`.
+    """
+    # ── 1. Fast exit ────────────────────────────────────────────────────────────
+    if pts_radar is None:
+        try:
+            if len(pts_radar) == 0: # Check length only if not None
+                return np.empty((0, 2), dtype=np.float64), np.empty((0,), dtype=bool)
+        except TypeError: # Handle cases where len() isn't applicable (e.g., scalar)
+            return np.empty((0, 2), dtype=np.float64), np.empty((0,), dtype=bool)
+            
+    # Ensure pts_radar is array-like before checking length if it wasn't None initially
+    try:
+        pts_radar_array = np.asarray(pts_radar)
+        if pts_radar_array.shape[0] == 0:
+             return np.empty((0, 2), dtype=np.float64), np.empty((0,), dtype=bool)
+    except Exception: # Catch potential errors during conversion/shape access
+        print("Warning: Could not process pts_radar input in project_radar_to_image.")
+        return np.empty((0, 2), dtype=np.float64), np.empty((0,), dtype=bool)
+
+
+    # ── 2. Contiguity & dtype harmonisation (float64 is the native OpenCV path) ─
+    P = np.ascontiguousarray(pts_radar_array, dtype=np.float64).reshape(-1, 3) # Use converted array
+    K = np.ascontiguousarray(K,         dtype=np.float64).reshape(3, 3)
+    R = np.ascontiguousarray(R,         dtype=np.float64).reshape(3, 3)
+    T = np.ascontiguousarray(T,         dtype=np.float64).reshape(3, 1)
+    D = None if D is None else np.ascontiguousarray(D, dtype=np.float64).reshape(-1, 1)
+
+    # ── 3. One call to cv2.Rodrigues (deterministic 27-flop SVD) ────────────────
+    try:
+        rvec, _ = cv2.Rodrigues(R)                                           # ㊉ Rodrigues
+        img_pts, _ = cv2.projectPoints(P, rvec, T, K, D)                     # ㊉ projectPoints
+        if img_pts is None: # projectPoints can return None on error
+             print("Warning: cv2.projectPoints returned None.")
+             return np.empty((P.shape[0], 2), dtype=np.float64), np.zeros((P.shape[0],), dtype=bool)
+        img_pts = img_pts.reshape(-1, 2)
+    except cv2.error as e:
+        print(f"Error in cv2.Rodrigues or cv2.projectPoints: {e}")
+        # Return arrays matching input shape but indicate invalidity
+        return np.full((P.shape[0], 2), np.nan, dtype=np.float64), np.zeros((P.shape[0],), dtype=bool)
+    except Exception as e: # Catch other potential errors
+        print(f"Unexpected error during projection calculation: {e}")
+        return np.full((P.shape[0], 2), np.nan, dtype=np.float64), np.zeros((P.shape[0],), dtype=bool)
+
+
+    # ── 4. Fast positive-depth mask  z_cam = R[2] @ Pᵀ + Tz  ──────────────────
+    try:
+        # Use np.dot for clarity and potentially better performance in some cases
+        z_cam = np.dot(P, R[2,:]) + T[2,0] # P is (N,3), R[2,:] is (3,) -> (N,)
+        # Original: z_cam = (R[2] @ P.T + T[2]).ravel() # R[2] is (1,3), P.T is (3,N) -> (1,N)
+        valid_mask = z_cam > eps_z
+        return img_pts, valid_mask
     except Exception as e:
-        print(f"Error during projection: {e}")
-        # traceback.print_exc()  # Uncomment for debugging if needed
-        return None, None
+         print(f"Error calculating depth mask: {e}")
+         # If depth calculation fails, mark all as invalid but return points
+         return img_pts, np.zeros((P.shape[0],), dtype=bool)
+
+def z_score_outlier_mask(x, thresh=3.5):
+    """
+    Returns a boolean mask for inliers using the Z-Score method.
+    """
+    med = np.median(x)
+    mad = median_abs_deviation(x, scale='normal')
+    if mad < 1e-8:
+        # All values are (almost) identical, keep all
+        return np.ones_like(x, dtype=bool)
+    z = 0.6745 * (x - med) / mad
+    return np.abs(z) < thresh
+
+if NUMBA_AVAILABLE:
+    @njit(fastmath=True)
+    def mad_mask_numba(x, med, mad, thresh):
+        mask = np.empty(x.shape, dtype=np.bool_)
+        for i in range(x.shape[0]):
+            z = 0.6745 * (x[i] - med) / mad if mad > 1e-8 else 0.0
+            mask[i] = np.abs(z) < thresh
+        return mask
+else:
+    mad_mask_numba = None
 
 if __name__ == '__main__':
     import sys
